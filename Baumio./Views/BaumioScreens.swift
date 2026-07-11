@@ -235,7 +235,7 @@ struct DashboardView: View {
                 AdaptiveGrid(minimum: 170) {
                     DashboardMetricCard(title: "Projektfortschritt", value: "\(Int(project.progress * 100)) %", subtitle: "Projektwert", systemImage: "chart.line.uptrend.xyaxis")
                     DashboardMetricCard(title: "Kostenübersicht", value: model.orderedCosts.euroString, subtitle: "von \(project.budget.euroString) Budget", systemImage: "eurosign.circle", tint: BaumioTheme.info)
-                    DashboardMetricCard(title: "Nächste Termine", value: "\(model.schedule.count)", subtitle: "aus deinen Daten", systemImage: "calendar", tint: BaumioTheme.accent)
+                    DashboardMetricCard(title: "Nächste Termine", value: "\(model.schedule.filter { $0.date >= Date() }.count)", subtitle: "in der Zukunft", systemImage: "calendar", tint: BaumioTheme.accent)
                     DashboardMetricCard(title: "Offene Aufgaben", value: "\(model.openTasks.count)", subtitle: "aus deinen Daten", systemImage: "checklist", tint: BaumioTheme.success)
                     DashboardMetricCard(title: "Mängel", value: "\(model.openDefects.count)", subtitle: "aus deinen Daten", systemImage: "exclamationmark.triangle", tint: BaumioTheme.warning)
                     DashboardMetricCard(title: "Heute fällig", value: "\(model.dueTodayCount)", subtitle: model.dueTodayCount == 0 ? "alles erledigt" : "Aufgaben & Mängel", systemImage: model.dueTodayCount == 0 ? "checkmark.circle" : "bell.badge", tint: model.dueTodayCount == 0 ? BaumioTheme.success : BaumioTheme.danger)
@@ -243,8 +243,8 @@ struct DashboardView: View {
                 }
             } else {
                 EmptyStateView(
-                    title: "Noch keine Supabase-Daten geladen",
-                    message: "In diesem Account werden keine Demo-Daten angezeigt. Sobald Projekte aus Supabase angebunden sind, erscheinen sie hier.",
+                    title: "Noch kein Projekt angelegt",
+                    message: "Erstelle dein erstes Bauprojekt unter \"Projekte\" – dann erscheinen hier alle Kennzahlen auf einen Blick.",
                     systemImage: "tray"
                 )
             }
@@ -341,6 +341,7 @@ struct ProjectsView: View {
     @Bindable var model: BaumioAppViewModel
     @State private var showingEditor = false
     @State private var editingProject: Project?
+    @State private var deletingProject: Project?
 
     var body: some View {
         ScreenScaffold(title: "Projekte", subtitle: "Projekt anlegen, bearbeiten und Status verfolgen") {
@@ -387,7 +388,7 @@ struct ProjectsView: View {
                                 Menu {
                                     Button("Bearbeiten") { editingProject = project }
                                     Button("Löschen", role: .destructive) {
-                                        model.handle { try await model.deleteProject(project) }
+                                        deletingProject = project
                                     }
                                 } label: {
                                     Image(systemName: "ellipsis.circle").foregroundStyle(BaumioTheme.secondaryText).font(.title3).frame(width: 44, height: 44)
@@ -410,6 +411,17 @@ struct ProjectsView: View {
         }
         .sheet(item: $editingProject) { project in
             ProjectEditorView(model: model, editing: project)
+        }
+        .alert("Projekt löschen?", isPresented: Binding(get: { deletingProject != nil }, set: { if !$0 { deletingProject = nil } })) {
+            Button("Abbrechen", role: .cancel) { deletingProject = nil }
+            Button("Löschen", role: .destructive) {
+                if let p = deletingProject {
+                    model.handle { try await model.deleteProject(p) }
+                    deletingProject = nil
+                }
+            }
+        } message: {
+            Text("Das Projekt \"\(deletingProject?.name ?? "")\" und alle zugehörigen Daten werden unwiderruflich gelöscht.")
         }
     }
 }
@@ -728,7 +740,9 @@ struct DiaryView: View {
                             .accessibilityLabel("Eintrag bearbeiten oder löschen")
                         }
                         Text(entry.completedWork).foregroundStyle(BaumioTheme.primaryText)
-                        Text("Firmen: \(entry.companies.joined(separator: ", "))").font(.footnote).foregroundStyle(BaumioTheme.secondaryText)
+                        if !entry.companies.isEmpty {
+                            Text("Firmen: \(entry.companies.joined(separator: ", "))").font(.footnote).foregroundStyle(BaumioTheme.secondaryText)
+                        }
                         PhotoSection(model: model, bucket: "diary-photos", photos: model.diaryPhotos[entry.id] ?? []) { data in
                             model.handle { try await model.addDiaryPhoto(entry, imageData: data) }
                         }
@@ -1527,7 +1541,7 @@ struct CostsView: View {
                                     Button("Bezahlt") { model.handle { try await model.updateCostStatus(cost, status: "bezahlt") } }
                                     Button("Storniert") { model.handle { try await model.updateCostStatus(cost, status: "storniert") } }
                                 } label: {
-                                    StatusBadge(title: cost.status, color: cost.status == "Bezahlt" ? BaumioTheme.success : BaumioTheme.info)
+                                    StatusBadge(title: cost.status, color: cost.status.lowercased() == "bezahlt" ? BaumioTheme.success : BaumioTheme.info)
                                 }
                                 .accessibilityLabel("Kostenstatus ändern")
                             }
@@ -1610,12 +1624,16 @@ struct OffersView: View {
 
     private var groupedOffers: [(scope: String, offers: [OfferItem])] {
         let byScope = Dictionary(grouping: model.offers.filter { !$0.scope.isEmpty }) { $0.scope }
-        return byScope.map { (scope: $0.key, offers: $0.value.sorted { $0.amount < $1.amount }) }
-            .sorted { $0.scope < $1.scope }
+        return byScope.compactMap { key, values -> (scope: String, offers: [OfferItem])? in
+            guard values.count >= 2 else { return nil }
+            return (scope: key, offers: values.sorted { $0.amount < $1.amount })
+        }.sorted { $0.scope < $1.scope }
     }
 
     private var ungroupedOffers: [OfferItem] {
-        model.offers.filter { $0.scope.isEmpty }
+        let byScope = Dictionary(grouping: model.offers.filter { !$0.scope.isEmpty }) { $0.scope }
+        let singleScopeOffers = byScope.filter { $0.value.count < 2 }.flatMap { $0.value }
+        return model.offers.filter { $0.scope.isEmpty } + singleScopeOffers
     }
 
     var body: some View {
@@ -3112,7 +3130,7 @@ struct ReviewEditorView: View {
                     Button("Abbrechen") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(isSaving ? "Speichert" : "Speichern") {
+                    Button(isSaving ? "Speichert …" : "Speichern") {
                         Task { await save() }
                     }
                     .disabled((editing == nil && selectedTrade == nil) || isSaving)
@@ -3306,7 +3324,7 @@ struct SettingsView: View {
             .buttonStyle(.plain)
 
             SettingsRow(icon: "globe", title: "Sprache", subtitle: "Deutsch")
-            SettingsRow(icon: "moon.fill", title: "Darstellung", subtitle: "Dark Mode oder System später wählbar")
+            SettingsRow(icon: "moon.fill", title: "Darstellung", subtitle: "Folgt den Systemeinstellungen")
 
             Text("Rechtliches")
                 .font(.caption.bold())
