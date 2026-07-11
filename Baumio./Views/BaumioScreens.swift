@@ -2138,6 +2138,9 @@ struct DocumentScannerSheet: View {
                 }
                 Section("Vergleichsgruppe") {
                     TextField("Ausschreibung (optional)", text: $aScope)
+                    Text("Gleiche Bezeichnung bei mehreren Firmen → automatischer Preisvergleich.")
+                        .font(.caption)
+                        .foregroundStyle(BaumioTheme.secondaryText)
                 }
                 Section("Notizen") {
                     TextField("Notizen (optional)", text: $aNotes, axis: .vertical).lineLimit(2...4)
@@ -3704,7 +3707,7 @@ enum QuickAddKind: String {
         case .defect: "Beschreibung des Mangels"
         case .timeLog: "Tätigkeit"
         case .handover: "Prüfpunkt (z. B. Fenster dicht)"
-        case .funding: "Förderprogramm (z. B. KfW 458)"
+        case .funding: "Förderprogramm (z. B. KfW 261)"
         }
     }
 }
@@ -4201,6 +4204,11 @@ struct QuickAddView: View {
 
                     if kind == .offer {
                         TextField("Ausschreibung / Vergleichsgruppe (optional)", text: $offerScope)
+                        if kind == .offer {
+                            Text("Tipp: Gleiche Ausschreibungsbezeichnung bei mehreren Firmen → automatischer Preisvergleich in der Übersicht.")
+                                .font(.caption)
+                                .foregroundStyle(BaumioTheme.secondaryText)
+                        }
                         TextField("Anbieter", text: $secondary)
                         TextField("Betrag (€)", text: $amount)
                         DatePicker("Erhalten am", selection: $date, displayedComponents: .date)
