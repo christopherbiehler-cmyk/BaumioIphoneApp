@@ -645,87 +645,280 @@ struct BauberichtPDFPage: View {
     private var openDefects: [DefectItem] { model.defects.filter { $0.status.lowercased() != "behoben" } }
     private var openTasks: [TaskItem] { model.tasks.filter { !$0.isDone } }
 
+    private var budgetUsedPercent: Int {
+        guard project.budget > 0 else { return 0 }
+        let used = (totalOrdered as NSDecimalNumber).doubleValue
+        let total = (project.budget as NSDecimalNumber).doubleValue
+        return min(Int(used / total * 100), 999)
+    }
+
+    private var budgetDiff: Decimal { project.budget - totalOrdered }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            PDFHeader(title: "Baubericht", projectName: project.name, exportDate: exportDate)
-            if !project.address.isEmpty {
-                Text("Adresse: \(project.address)").font(.system(size: 12)).foregroundStyle(Color(hex: "555555"))
-            }
-            Divider()
+        VStack(alignment: .leading, spacing: 0) {
 
-            Group {
-                Text("Projektübersicht").font(.system(size: 14, weight: .bold))
-                row("Status", project.status.rawValue)
-                row("Budget", project.budget.euroString)
-                row("Gesamtfortschritt", "\(model.overallProgress) %")
-                row("Aufgaben", "\(model.progressTasks) %")
-                row("Kosten", "\(model.progressCosts) %")
+            // ── Banner ────────────────────────────────────────────────────────
+            PDFBanner(
+                title: "BAUBERICHT",
+                subtitle: "Statusbericht · \(project.name)",
+                exportDate: exportDate
+            )
+            .padding(.bottom, 12)
+
+            // ── Projektinfo ───────────────────────────────────────────────────
+            HStack(spacing: 0) {
+                infoCellPDF(label: "Projekt", value: project.name)
+                Divider().frame(maxHeight: 36)
+                if !project.address.isEmpty {
+                    infoCellPDF(label: "Adresse", value: project.address)
+                    Divider().frame(maxHeight: 36)
+                }
+                infoCellPDF(label: "Status", value: project.status.rawValue)
+                Divider().frame(maxHeight: 36)
+                infoCellPDF(
+                    label: "Gepl. Fertigstellung",
+                    value: project.plannedEndDate.formatted(date: .abbreviated, time: .omitted)
+                )
+            }
+            .padding(10)
+            .background(Color(hex: "F5F7FA"))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .padding(.bottom, 14)
+
+            // ── KPI-Kacheln ───────────────────────────────────────────────────
+            sectionLabel("KENNZAHLEN")
+            HStack(spacing: 10) {
+                kpiBox("Fortschritt gesamt", "\(model.overallProgress) %", Color(hex: "1C3557"))
+                kpiBox("Aufgaben erledigt", "\(model.progressTasks) %", Color(hex: "22C55E"))
+                kpiBox(
+                    "Budget verplant",
+                    "\(budgetUsedPercent) %",
+                    budgetUsedPercent > 90 ? Color(hex: "EF4444") : Color(hex: "F59E0B")
+                )
+                kpiBox(
+                    "Offene Mängel",
+                    "\(openDefects.count)",
+                    openDefects.isEmpty ? Color(hex: "22C55E") : Color(hex: "EF4444")
+                )
                 if !model.totalTrackedTimeText.isEmpty {
-                    row("Zeiterfassung", model.totalTrackedTimeText)
+                    kpiBox("Zeiterfassung", model.totalTrackedTimeText, Color(hex: "3B82F6"))
                 }
             }
-            Divider()
+            .padding(.bottom, 14)
 
-            Group {
-                Text("Kostenübersicht").font(.system(size: 14, weight: .bold))
-                row("Geplant", totalPlanned.euroString)
-                row("Beauftragt", totalOrdered.euroString)
-                row("Bezahlt", totalPaid.euroString)
-            }
+            // ── Kostenübersicht ───────────────────────────────────────────────
+            sectionLabel("KOSTENÜBERSICHT")
+            costTable
+                .padding(.bottom, 14)
 
+            // ── Offene Mängel ─────────────────────────────────────────────────
             if !openDefects.isEmpty {
-                Divider()
-                Text("Offene Mängel (\(openDefects.count))").font(.system(size: 14, weight: .bold))
-                ForEach(openDefects.prefix(10)) { d in
-                    HStack(alignment: .top, spacing: 6) {
-                        Text("•").font(.system(size: 12))
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(d.description).font(.system(size: 11, weight: .medium))
-                            Text("\(d.trade.isEmpty ? "" : "\(d.trade) · ")\(d.status)").font(.system(size: 10)).foregroundStyle(Color(hex: "666666"))
-                        }
+                sectionLabel("OFFENE MÄNGEL (\(openDefects.count))")
+                VStack(spacing: 4) {
+                    ForEach(openDefects.prefix(8)) { d in
+                        defectRow(d)
                     }
                 }
+                .padding(.bottom, 14)
             }
 
+            // ── Offene Aufgaben ───────────────────────────────────────────────
             if !openTasks.isEmpty {
-                Divider()
-                Text("Offene Aufgaben (\(openTasks.count))").font(.system(size: 14, weight: .bold))
-                ForEach(openTasks.prefix(10)) { t in
-                    HStack(spacing: 6) {
-                        Text("•").font(.system(size: 12))
-                        Text(t.title).font(.system(size: 11))
-                        Spacer()
-                        Text(t.dueDate.formatted(date: .abbreviated, time: .omitted)).font(.system(size: 10)).foregroundStyle(Color(hex: "666666"))
+                sectionLabel("OFFENE AUFGABEN (\(openTasks.count))")
+                VStack(spacing: 2) {
+                    ForEach(openTasks.prefix(8)) { t in
+                        taskRow(t)
                     }
                 }
+                .padding(.bottom, 14)
             }
 
+            // ── Bautagebuch ───────────────────────────────────────────────────
             if !model.diary.isEmpty {
-                Divider()
-                Text("Bautagebuch (letzte Einträge)").font(.system(size: 14, weight: .bold))
-                ForEach(model.diary.prefix(5)) { e in
-                    HStack(alignment: .top, spacing: 6) {
-                        Text(e.date.formatted(date: .abbreviated, time: .omitted)).font(.system(size: 10)).foregroundStyle(Color(hex: "666666")).frame(width: 70, alignment: .leading)
-                        Text(e.notes).font(.system(size: 11)).lineLimit(2)
+                sectionLabel("BAUTAGEBUCH – LETZTE EINTRÄGE")
+                VStack(spacing: 4) {
+                    ForEach(model.diary.prefix(6)) { e in
+                        diaryRow(e)
                     }
                 }
+                .padding(.bottom, 14)
             }
 
-            Spacer(minLength: 0)
-            Divider()
-            Text("Erstellt mit Baumio · baumio.eu").font(.system(size: 9)).foregroundStyle(Color(hex: "999999"))
+            Spacer(minLength: 12)
+
+            // ── Footer ────────────────────────────────────────────────────────
+            Rectangle().fill(Color(hex: "1C3557")).frame(height: 1)
+            HStack {
+                Text("Erstellt mit Baumio · baumio.eu")
+                Spacer()
+                Text("Stand: \(exportDate.formatted(date: .long, time: .omitted))")
+            }
+            .font(.system(size: 9))
+            .foregroundStyle(Color(hex: "999999"))
+            .padding(.top, 5)
         }
-        .padding(32)
+        .padding(36)
         .frame(width: 794)
         .background(Color.white)
     }
 
-    private func row(_ label: String, _ value: String) -> some View {
-        HStack {
-            Text(label).font(.system(size: 12)).foregroundStyle(Color(hex: "555555"))
-            Spacer()
-            Text(value).font(.system(size: 12, weight: .medium))
+    // MARK: - Sub-views
+
+    private var costTable: some View {
+        VStack(spacing: 0) {
+            // Tabellen-Header
+            HStack {
+                Text("Kostenart")
+                    .font(.system(size: 9, weight: .bold)).foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text("Geplant").font(.system(size: 9, weight: .bold)).foregroundStyle(.white).frame(width: 110, alignment: .trailing)
+                Text("Beauftragt").font(.system(size: 9, weight: .bold)).foregroundStyle(.white).frame(width: 110, alignment: .trailing)
+                Text("Bezahlt").font(.system(size: 9, weight: .bold)).foregroundStyle(.white).frame(width: 110, alignment: .trailing)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .background(Color(hex: "1C3557"))
+
+            // Einzelne Kostenpositionen (max. 10)
+            ForEach(Array(model.costs.prefix(10).enumerated()), id: \.element.id) { i, c in
+                HStack {
+                    Text(c.title).font(.system(size: 10)).lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Text(c.planned.euroString).font(.system(size: 10)).frame(width: 110, alignment: .trailing)
+                    Text(c.ordered.euroString).font(.system(size: 10)).frame(width: 110, alignment: .trailing)
+                    Text(c.paid.euroString).font(.system(size: 10)).frame(width: 110, alignment: .trailing)
+                }
+                .padding(.horizontal, 12).padding(.vertical, 5)
+                .background(i % 2 == 0 ? Color.white : Color(hex: "F5F7FA"))
+            }
+
+            // Summenzeile
+            HStack {
+                Text("GESAMT").font(.system(size: 10, weight: .bold))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(totalPlanned.euroString).font(.system(size: 10, weight: .bold)).frame(width: 110, alignment: .trailing)
+                Text(totalOrdered.euroString).font(.system(size: 10, weight: .bold)).frame(width: 110, alignment: .trailing)
+                Text(totalPaid.euroString).font(.system(size: 10, weight: .bold)).frame(width: 110, alignment: .trailing)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .background(Color(hex: "EEF2F7"))
+
+            // Budget-Puffer / Überzug
+            if project.budget > 0 {
+                HStack {
+                    Text("Budget: \(project.budget.euroString)")
+                        .font(.system(size: 9)).foregroundStyle(Color(hex: "555555"))
+                    Spacer()
+                    let isOver = budgetDiff < 0
+                    Text(isOver
+                         ? "Überzug: \((-budgetDiff).euroString)"
+                         : "Puffer: \(budgetDiff.euroString)")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(isOver ? Color(hex: "EF4444") : Color(hex: "22C55E"))
+                }
+                .padding(.horizontal, 12).padding(.vertical, 5)
+                .background(Color(hex: "F9F9F9"))
+            }
         }
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(hex: "DDDDDD"), lineWidth: 0.5))
+    }
+
+    private func kpiBox(_ label: String, _ value: String, _ color: Color) -> some View {
+        VStack(spacing: 4) {
+            Text(value)
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(color)
+                .minimumScaleFactor(0.6)
+                .lineLimit(1)
+            Text(label)
+                .font(.system(size: 8))
+                .foregroundStyle(Color(hex: "555555"))
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 10).padding(.horizontal, 4)
+        .background(Color(hex: "F5F7FA"))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func sectionLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 10, weight: .bold))
+            .foregroundStyle(Color(hex: "888888"))
+            .padding(.bottom, 5)
+    }
+
+    private func defectRow(_ d: DefectItem) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Circle()
+                .fill(d.priority == .high
+                      ? Color(hex: "EF4444")
+                      : d.priority == .medium ? Color(hex: "F59E0B") : Color(hex: "22C55E"))
+                .frame(width: 8, height: 8)
+                .padding(.top, 3)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(d.title.isEmpty ? d.description : d.title)
+                    .font(.system(size: 10, weight: .semibold)).lineLimit(1)
+                let meta = [d.trade, d.status].filter { !$0.isEmpty }.joined(separator: " · ")
+                if !meta.isEmpty {
+                    Text(meta).font(.system(size: 9)).foregroundStyle(Color(hex: "888888"))
+                }
+            }
+            Spacer()
+            Text("Frist: \(d.deadline.formatted(date: .abbreviated, time: .omitted))")
+                .font(.system(size: 9)).foregroundStyle(Color(hex: "888888"))
+        }
+        .padding(.horizontal, 10).padding(.vertical, 5)
+        .background(Color(hex: "FFF9F9"))
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color(hex: "FFDDDD"), lineWidth: 0.5))
+    }
+
+    private func taskRow(_ t: TaskItem) -> some View {
+        HStack {
+            Text(t.isDone ? "✓" : "○")
+                .font(.system(size: 10))
+                .foregroundStyle(t.isDone ? Color(hex: "22C55E") : Color(hex: "BBBBBB"))
+                .frame(width: 14)
+            Text(t.title).font(.system(size: 10)).lineLimit(1)
+            Spacer()
+            Text(t.dueDate.formatted(date: .abbreviated, time: .omitted))
+                .font(.system(size: 9)).foregroundStyle(Color(hex: "888888"))
+        }
+        .padding(.horizontal, 10).padding(.vertical, 4)
+        .background(Color(hex: "F9F9F9"))
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+    }
+
+    private func diaryRow(_ e: DiaryEntry) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text(e.date.formatted(date: .abbreviated, time: .omitted))
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(Color(hex: "1C3557"))
+                .frame(width: 68, alignment: .leading)
+            VStack(alignment: .leading, spacing: 2) {
+                let sub: [String] = [
+                    e.weather,
+                    e.companies.isEmpty ? "" : e.companies.joined(separator: ", ")
+                ].filter { !$0.isEmpty }
+                if !sub.isEmpty {
+                    Text(sub.joined(separator: " · "))
+                        .font(.system(size: 8)).foregroundStyle(Color(hex: "888888"))
+                }
+                let body = [e.completedWork, e.notes].filter { !$0.isEmpty }.joined(separator: " ")
+                if !body.isEmpty {
+                    Text(body).font(.system(size: 10)).lineLimit(2)
+                }
+                if e.photosCount > 0 {
+                    Text("\(e.photosCount) Foto(s)").font(.system(size: 8)).foregroundStyle(Color(hex: "888888"))
+                }
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 10).padding(.vertical, 6)
+        .background(Color(hex: "F9F9F9"))
+        .clipShape(RoundedRectangle(cornerRadius: 4))
     }
 }
 
