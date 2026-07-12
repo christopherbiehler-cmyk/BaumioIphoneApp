@@ -1045,11 +1045,12 @@ struct HandoverView: View {
     @State private var showingTemplates = false
     @State private var editingItem: EditingItem?
     @State private var exportSheet: ShareableURL?
+    @State private var jsonExportSheet: ShareableURL?
 
     var body: some View {
         ScreenScaffold(title: "Übergabe & Abnahme", subtitle: "Prüfpunkte abhaken und Status festhalten") {
             PrimaryButton(title: "Prüfpunkt anlegen", systemImage: "plus", action: { showingEditor = true })
-            SecondaryButton(title: "Vorlage laden", systemImage: "list.bullet.clipboard") { showingTemplates = true }
+            SecondaryButton(title: "Vorlage laden / importieren", systemImage: "list.bullet.clipboard") { showingTemplates = true }
 
             if model.isPro {
                 SecondaryButton(title: "Protokoll als PDF exportieren", systemImage: "square.and.arrow.up") {
@@ -1057,6 +1058,10 @@ struct HandoverView: View {
                         HandoverPDFPage(items: model.handoverItems, projectName: model.selectedProject?.name ?? "Projekt", exportDate: Date(), project: model.selectedProject),
                         fileName: "Abnahmeprotokoll.pdf"
                     ) { exportSheet = ShareableURL(url: url) }
+                }
+                .disabled(model.handoverItems.isEmpty)
+                SecondaryButton(title: "Checkliste als JSON exportieren", systemImage: "square.and.arrow.up.on.square") {
+                    if let url = exportChecklistAsJSON() { jsonExportSheet = ShareableURL(url: url) }
                 }
                 .disabled(model.handoverItems.isEmpty)
             } else {
@@ -1139,9 +1144,27 @@ struct HandoverView: View {
         .sheet(item: $exportSheet) { shareable in
             ShareSheet(items: [shareable.url])
         }
+        .sheet(item: $jsonExportSheet) { shareable in
+            ShareSheet(items: [shareable.url])
+        }
         .sheet(isPresented: $showingTemplates) {
             HandoverTemplateSheet(model: model)
         }
+    }
+
+    private func exportChecklistAsJSON() -> URL? {
+        let items = model.handoverItems.map { entry -> [String: String] in
+            ["item": entry.item, "room": entry.room, "tradeType": entry.tradeType, "notes": entry.notes]
+        }
+        let wrapper: [String: Any] = [
+            "name": model.selectedProject?.name ?? "Meine Checkliste",
+            "exportDate": ISO8601DateFormatter().string(from: Date()),
+            "items": items
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: wrapper, options: .prettyPrinted) else { return nil }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("Baumio_Checkliste.json")
+        try? data.write(to: url)
+        return url
     }
 
     private func handoverSubtitle(_ entry: HandoverItem) -> String {
@@ -1163,35 +1186,69 @@ struct HandoverTemplateSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var isLoading = false
     @State private var loadedTemplate: String? = nil
+    @State private var showingImporter = false
+    @State private var importError: String?
 
     var body: some View {
         NavigationStack {
             List {
                 Section {
-                    Text("Wähle eine Vorlage – die Prüfpunkte werden deinem Projekt hinzugefügt.")
+                    Text("Wähle eine Vorlage oder importiere eine eigene JSON-Datei.")
                         .font(.footnote).foregroundStyle(BaumioTheme.secondaryText)
                 }
-                ForEach(handoverTemplates, id: \.name) { template in
+
+                Section("Eigene Vorlage") {
                     Button {
-                        loadTemplate(template)
+                        showingImporter = true
                     } label: {
                         HStack {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(template.name).font(.headline).foregroundStyle(BaumioTheme.primaryText)
-                                Text("\(template.items.count) Prüfpunkte")
-                                    .font(.caption).foregroundStyle(BaumioTheme.secondaryText)
-                            }
+                            Label("JSON-Datei importieren", systemImage: "square.and.arrow.down")
+                                .foregroundStyle(BaumioTheme.accent)
                             Spacer()
-                            if loadedTemplate == template.name {
-                                Image(systemName: "checkmark.circle.fill").foregroundStyle(BaumioTheme.success)
-                            } else if isLoading {
+                            if isLoading {
                                 ProgressView()
-                            } else {
-                                Image(systemName: "chevron.right").foregroundStyle(BaumioTheme.secondaryText)
                             }
                         }
                     }
                     .disabled(isLoading)
+                    if let importError {
+                        Text(importError)
+                            .font(.caption)
+                            .foregroundStyle(BaumioTheme.danger)
+                    }
+                    if let loadedTemplate, loadedTemplate.hasPrefix("Import") {
+                        Label(loadedTemplate, systemImage: "checkmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(BaumioTheme.success)
+                    }
+                    Text("Format: JSON-Datei aus Baumio-Export oder mit Feldern \"item\", \"room\", \"tradeType\".")
+                        .font(.caption2)
+                        .foregroundStyle(BaumioTheme.secondaryText)
+                }
+
+                Section("Integrierte Vorlagen") {
+                    ForEach(handoverTemplates, id: \.name) { template in
+                        Button {
+                            loadTemplate(template)
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(template.name).font(.headline).foregroundStyle(BaumioTheme.primaryText)
+                                    Text("\(template.items.count) Prüfpunkte")
+                                        .font(.caption).foregroundStyle(BaumioTheme.secondaryText)
+                                }
+                                Spacer()
+                                if loadedTemplate == template.name {
+                                    Image(systemName: "checkmark.circle.fill").foregroundStyle(BaumioTheme.success)
+                                } else if isLoading {
+                                    ProgressView()
+                                } else {
+                                    Image(systemName: "chevron.right").foregroundStyle(BaumioTheme.secondaryText)
+                                }
+                            }
+                        }
+                        .disabled(isLoading)
+                    }
                 }
             }
             .navigationTitle("Vorlage laden")
@@ -1200,6 +1257,46 @@ struct HandoverTemplateSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Fertig") { dismiss() }
                 }
+            }
+            .fileImporter(isPresented: $showingImporter, allowedContentTypes: [.json]) { result in
+                importFromJSON(result)
+            }
+        }
+    }
+
+    private func importFromJSON(_ result: Result<URL, Error>) {
+        importError = nil
+        switch result {
+        case .failure:
+            importError = "Datei konnte nicht geöffnet werden."
+        case .success(let url):
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            guard let data = try? Data(contentsOf: url),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let rawItems = json["items"] as? [[String: String]] else {
+                importError = "Ungültiges Format. Erwartet: Baumio-JSON mit \"items\"-Array."
+                return
+            }
+            let entries = rawItems.compactMap { dict -> (item: String, room: String, trade: String)? in
+                guard let item = dict["item"], !item.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+                return (item: item, room: dict["room"] ?? "", trade: dict["tradeType"] ?? "")
+            }
+            guard !entries.isEmpty else {
+                importError = "Keine gültigen Prüfpunkte gefunden."
+                return
+            }
+            isLoading = true
+            Task {
+                do {
+                    for entry in entries {
+                        try await model.createHandoverItem(item: entry.item, room: entry.room, tradeType: entry.trade)
+                    }
+                    loadedTemplate = "Import (\(entries.count) Punkte geladen)"
+                } catch {
+                    importError = error.localizedDescription
+                }
+                isLoading = false
             }
         }
     }
