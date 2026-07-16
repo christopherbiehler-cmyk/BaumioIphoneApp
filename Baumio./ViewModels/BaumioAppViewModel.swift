@@ -611,6 +611,7 @@ final class BaumioAppViewModel {
     private func loadDetails(for project: Project) async throws {
         guard let accessToken = supabaseSession?.accessToken else { throw SupabaseError.missingSession }
         let details = try await supabase.fetchProjectDetails(projectID: project.id, accessToken: accessToken)
+        try Task.checkCancellation()
         trades = details.trades
         schedule = details.schedule
         tasks = details.tasks
@@ -655,8 +656,8 @@ final class BaumioAppViewModel {
     }
 
     func addDefectPhoto(_ defect: DefectItem, imageData: Data) async throws {
-        let path = try await uploadPhoto(bucket: "defect-photos", parentID: defect.id, imageData: imageData)
         let context = try supabaseContext()
+        let path = try await uploadPhoto(bucket: "defect-photos", parentID: defect.id, imageData: imageData)
         do {
             let rows: [SupabasePhotoRow] = try await supabase.insertReturning(NewSupabaseDefectPhoto(defectID: defect.id, storagePath: path, fileSize: imageData.count), into: "defect_photos", accessToken: context.accessToken)
             if let row = rows.first {
@@ -670,8 +671,8 @@ final class BaumioAppViewModel {
     }
 
     func addDiaryPhoto(_ entry: DiaryEntry, imageData: Data) async throws {
-        let path = try await uploadPhoto(bucket: "diary-photos", parentID: entry.id, imageData: imageData)
         let context = try supabaseContext()
+        let path = try await uploadPhoto(bucket: "diary-photos", parentID: entry.id, imageData: imageData)
         do {
             let rows: [SupabasePhotoRow] = try await supabase.insertReturning(NewSupabaseDiaryPhoto(diaryEntryID: entry.id, storagePath: path, fileSize: imageData.count), into: "diary_photos", accessToken: context.accessToken)
             if let row = rows.first {
@@ -685,8 +686,8 @@ final class BaumioAppViewModel {
     }
 
     func addCostPhoto(_ cost: CostItem, imageData: Data) async throws {
-        let path = try await uploadPhoto(bucket: "cost-photos", parentID: cost.id, imageData: imageData)
         let context = try supabaseContext()
+        let path = try await uploadPhoto(bucket: "cost-photos", parentID: cost.id, imageData: imageData)
         do {
             let rows: [SupabasePhotoRow] = try await supabase.insertReturning(NewSupabaseCostPhoto(costID: cost.id, storagePath: path, fileSize: imageData.count), into: "cost_photos", accessToken: context.accessToken)
             if let row = rows.first {
@@ -700,8 +701,8 @@ final class BaumioAppViewModel {
     }
 
     func addTaskPhoto(_ task: TaskItem, imageData: Data) async throws {
-        let path = try await uploadPhoto(bucket: "task-photos", parentID: task.id, imageData: imageData)
         let context = try supabaseContext()
+        let path = try await uploadPhoto(bucket: "task-photos", parentID: task.id, imageData: imageData)
         do {
             let rows: [SupabasePhotoRow] = try await supabase.insertReturning(NewSupabaseTaskPhoto(taskID: task.id, storagePath: path, fileSize: imageData.count), into: "task_photos", accessToken: context.accessToken)
             if let row = rows.first {

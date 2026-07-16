@@ -65,6 +65,7 @@ enum AppError: LocalizedError {
 enum SupabaseError: LocalizedError {
     case notConfigured
     case invalidResponse
+    case emailConfirmationRequired
     case missingSession
     case missingProject
     case requestFailed(String)
@@ -74,6 +75,7 @@ enum SupabaseError: LocalizedError {
         switch self {
         case .notConfigured: "Supabase ist noch nicht konfiguriert."
         case .invalidResponse: "Die Antwort von Supabase konnte nicht verarbeitet werden."
+        case .emailConfirmationRequired: "Bitte bestätige deine E-Mail-Adresse und melde dich dann an."
         case .missingSession: "Du bist nicht angemeldet. Bitte logge dich erneut ein."
         case .missingProject: "Bitte lege zuerst ein Projekt an oder wähle ein Projekt aus."
         case .requestFailed(let message): message
@@ -1377,8 +1379,7 @@ struct SupabaseService: Sendable {
         let endpoint = try endpoint(path: "auth/v1/signup")
         do {
             return try await sendAuth(endpoint: endpoint, body: AuthRequest(email: email, password: password))
-        } catch SupabaseError.invalidResponse {
-            // Supabase gibt ein User-Objekt (kein access_token) zurück wenn E-Mail-Bestätigung erforderlich ist.
+        } catch SupabaseError.emailConfirmationRequired {
             return nil
         }
     }
@@ -1762,6 +1763,12 @@ struct SupabaseService: Sendable {
         if ResponseBody.self == EmptySupabaseResponse.self, data.isEmpty { return EmptySupabaseResponse() as! ResponseBody }
         do { return try JSONDecoder().decode(ResponseBody.self, from: data) } catch {
             if ResponseBody.self == EmptySupabaseResponse.self { return EmptySupabaseResponse() as! ResponseBody }
+            // Supabase returns HTTP 200 with a user object (no access_token) when email confirmation is required
+            if httpResponse.statusCode == 200,
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               json["user"] != nil, json["access_token"] == nil {
+                throw SupabaseError.emailConfirmationRequired
+            }
             throw SupabaseError.invalidResponse
         }
     }
