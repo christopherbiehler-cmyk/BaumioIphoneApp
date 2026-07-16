@@ -54,12 +54,21 @@ struct ProjectDetails: Sendable {
     let reviews: [ReviewItem]
 }
 
+enum AppError: LocalizedError {
+    case validation(String)
+
+    var errorDescription: String? {
+        switch self { case .validation(let msg): msg }
+    }
+}
+
 enum SupabaseError: LocalizedError {
     case notConfigured
     case invalidResponse
     case missingSession
     case missingProject
     case requestFailed(String)
+    case unauthorized
 
     var errorDescription: String? {
         switch self {
@@ -68,6 +77,7 @@ enum SupabaseError: LocalizedError {
         case .missingSession: "Du bist nicht angemeldet. Bitte logge dich erneut ein."
         case .missingProject: "Bitte lege zuerst ein Projekt an oder wähle ein Projekt aus."
         case .requestFailed(let message): message
+        case .unauthorized: "Deine Sitzung ist abgelaufen. Bitte logge dich erneut ein."
         }
     }
 }
@@ -172,6 +182,8 @@ struct SupabaseProject: Codable, Identifiable, Sendable {
     let endDate: String?
     let description: String?
     let progressByCosts: Int?
+    let eigenkapital: Decimal?
+    let kredit: Decimal?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -183,6 +195,8 @@ struct SupabaseProject: Codable, Identifiable, Sendable {
         case endDate = "end_date"
         case description
         case progressByCosts = "progress_by_costs"
+        case eigenkapital
+        case kredit
     }
 
     var appProject: Project {
@@ -196,7 +210,10 @@ struct SupabaseProject: Codable, Identifiable, Sendable {
             description: description ?? "",
             status: ProjectStatus(supabaseValue: status),
             progress: 0,
-            progressByCosts: progressByCosts ?? 0
+            progressByCosts: progressByCosts ?? 0,
+            eigenkapital: eigenkapital ?? 0,
+            kredit: kredit ?? 0,
+            ownerUserID: userID
         )
     }
 
@@ -230,12 +247,16 @@ struct UpdateSupabaseProject: Encodable, Sendable {
     let startDate: String?
     let endDate: String?
     let description: String?
+    let eigenkapital: Decimal
+    let kredit: Decimal
 
     enum CodingKeys: String, CodingKey {
         case name, status, budget
         case startDate = "start_date"
         case endDate = "end_date"
         case description
+        case eigenkapital
+        case kredit
     }
 }
 
@@ -341,6 +362,7 @@ struct NewSupabaseMaterial: Encodable, Sendable {
     let orderDate: String?
     let deliveryDate: String?
     let notes: String?
+    let url: String?
 
     enum CodingKeys: String, CodingKey {
         case projectID = "project_id"
@@ -354,6 +376,7 @@ struct NewSupabaseMaterial: Encodable, Sendable {
         case orderDate = "order_date"
         case deliveryDate = "delivery_date"
         case notes
+        case url
     }
 }
 
@@ -473,6 +496,7 @@ struct UpdateSupabaseMaterial: Encodable, Sendable {
     let priceEstimated: Decimal?
     let status: String
     let notes: String?
+    let url: String?
 
     enum CodingKeys: String, CodingKey {
         case name
@@ -483,6 +507,7 @@ struct UpdateSupabaseMaterial: Encodable, Sendable {
         case priceEstimated = "price_estimated"
         case status
         case notes
+        case url
     }
 }
 
@@ -616,6 +641,7 @@ struct SupabaseMaterialRow: Decodable, Sendable {
     let priceActual: Decimal?
     let status: String?
     let notes: String?
+    let url: String?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -628,12 +654,28 @@ struct SupabaseMaterialRow: Decodable, Sendable {
         case priceActual = "price_actual"
         case status
         case notes
+        case url
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        quantity = try c.decodeIfPresent(Decimal.self, forKey: .quantity)
+        unit = try c.decodeIfPresent(String.self, forKey: .unit)
+        supplier = try c.decodeIfPresent(String.self, forKey: .supplier)
+        articleNumber = try c.decodeIfPresent(String.self, forKey: .articleNumber)
+        priceEstimated = try c.decodeIfPresent(Decimal.self, forKey: .priceEstimated)
+        priceActual = try c.decodeIfPresent(Decimal.self, forKey: .priceActual)
+        status = try c.decodeIfPresent(String.self, forKey: .status)
+        notes = try c.decodeIfPresent(String.self, forKey: .notes)
+        url = try c.decodeIfPresent(String.self, forKey: .url)
     }
 
     var appMaterial: MaterialItem {
         let (fundingID, cleanNotes) = FundingLinkCoder.decode(notes)
         // Wie die Website: tatsächlicher Preis bevorzugt, sonst geschätzter Preis (Einzelpreis).
-        return MaterialItem(id: id, name: name, quantity: NSDecimalNumber(decimal: quantity ?? 0).doubleValue, unit: unit ?? "Stück", supplier: supplier ?? "", articleNumber: articleNumber ?? "", price: priceActual ?? priceEstimated ?? 0, deliveryStatus: status?.displayStatus ?? "Geplant", trade: "", notes: cleanNotes, fundingItemID: fundingID)
+        return MaterialItem(id: id, name: name, quantity: quantity ?? 0, unit: unit ?? "Stück", supplier: supplier ?? "", articleNumber: articleNumber ?? "", price: priceActual ?? priceEstimated ?? 0, deliveryStatus: status?.displayStatus ?? "Geplant", trade: "", notes: cleanNotes, fundingItemID: fundingID, url: url ?? "")
     }
 }
 
@@ -675,9 +717,9 @@ struct SupabaseCostRow: Decodable, Sendable {
     }
 
     var appCost: CostItem {
-        let normalizedStatus = status ?? "offen"
-        let ordered = ["beauftragt", "bezahlt"].contains(normalizedStatus) ? amount : 0
-        let paid = status == "bezahlt" ? amount : 0
+        let normalizedStatus = status ?? CostStatusValue.open
+        let ordered = CostStatusValue.isOrdered(normalizedStatus) ? amount : 0
+        let paid = CostStatusValue.isPaid(normalizedStatus) ? amount : 0
         let (fundingID, cleanNotes) = FundingLinkCoder.decode(notes)
         // Geplant = planned_amount falls gesetzt, sonst der Betrag (wie die Website).
         return CostItem(
@@ -1291,6 +1333,30 @@ struct NewSupabaseDiaryPhoto: Encodable, Sendable {
     }
 }
 
+struct NewSupabaseCostPhoto: Encodable, Sendable {
+    let costID: UUID
+    let storagePath: String
+    let fileSize: Int
+
+    enum CodingKeys: String, CodingKey {
+        case costID = "cost_id"
+        case storagePath = "storage_path"
+        case fileSize = "file_size"
+    }
+}
+
+struct NewSupabaseTaskPhoto: Encodable, Sendable {
+    let taskID: UUID
+    let storagePath: String
+    let fileSize: Int
+
+    enum CodingKeys: String, CodingKey {
+        case taskID = "task_id"
+        case storagePath = "storage_path"
+        case fileSize = "file_size"
+    }
+}
+
 struct SupabaseService: Sendable {
     private let config: SupabaseConfig?
     private let session: URLSession
@@ -1309,7 +1375,12 @@ struct SupabaseService: Sendable {
 
     func signUp(email: String, password: String) async throws -> SupabaseSession? {
         let endpoint = try endpoint(path: "auth/v1/signup")
-        return try await sendAuth(endpoint: endpoint, body: AuthRequest(email: email, password: password))
+        do {
+            return try await sendAuth(endpoint: endpoint, body: AuthRequest(email: email, password: password))
+        } catch SupabaseError.invalidResponse {
+            // Supabase gibt ein User-Objekt (kein access_token) zurück wenn E-Mail-Bestätigung erforderlich ist.
+            return nil
+        }
     }
 
     func resetPassword(email: String) async throws {
@@ -1398,6 +1469,37 @@ struct SupabaseService: Sendable {
         }
     }
 
+    // MARK: - Projektmitglieder
+
+    func fetchProjectMembers(projectID: UUID, accessToken: String) async throws -> [ProjectMember] {
+        let endpoint = try endpoint(path: "rest/v1/project_members", query: [
+            URLQueryItem(name: "select", value: "*"),
+            URLQueryItem(name: "project_id", value: "eq.\(projectID.uuidString)")
+        ])
+        let rows: [SupabaseProjectMember] = try await sendRest(endpoint: endpoint, method: "GET", accessToken: accessToken)
+        return rows.map(\.appMember)
+    }
+
+    func fetchPendingInvites(email: String, accessToken: String) async throws -> [ProjectMember] {
+        // URLComponents kodiert query-Werte automatisch — kein manuelles Encoding nötig
+        let normalizedEmail = email.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let endpoint = try endpoint(path: "rest/v1/project_members", query: [
+            URLQueryItem(name: "select", value: "*,projects(name)"),
+            URLQueryItem(name: "invited_email", value: "eq.\(normalizedEmail)"),
+            URLQueryItem(name: "status", value: "eq.pending")
+        ])
+        let rows: [SupabaseProjectMember] = try await sendRest(endpoint: endpoint, method: "GET", accessToken: accessToken)
+        return rows.map(\.appMember)
+    }
+
+    func acceptInvite(id: UUID, accessToken: String) async throws {
+        struct Patch: Encodable { let status: String }
+        let endpoint = try endpoint(path: "rest/v1/project_members", query: [
+            URLQueryItem(name: "id", value: "eq.\(id.uuidString)")
+        ])
+        let _: EmptySupabaseResponse = try await sendRest(endpoint: endpoint, method: "PATCH", accessToken: accessToken, body: Patch(status: "accepted"), prefer: "return=minimal")
+    }
+
     /// Löscht das Konto samt Daten über die Edge Function `delete-account` (nutzt den User-JWT).
     func deleteAccount(accessToken: String) async throws {
         guard let config else { throw SupabaseError.notConfigured }
@@ -1415,16 +1517,25 @@ struct SupabaseService: Sendable {
         return try await sendAuth(endpoint: endpoint, body: AppleTokenRequest(idToken: idToken, nonce: nonce))
     }
 
-    /// Liest den Plan aus `profiles.plan`. Pro ist aktiv bei 'pro' oder 'business'
-    /// (gleiche Spalte wie Website/Stripe und Admin-Backend).
-    func fetchProStatus(userID: UUID, accessToken: String) async throws -> Bool {
+    /// Liest den Plan aus `profiles.plan` und gibt ihn als String zurück ("free", "pro", "business").
+    func fetchPlan(userID: UUID, accessToken: String) async throws -> String {
         let endpoint = try endpoint(path: "rest/v1/profiles", query: [
             URLQueryItem(name: "select", value: "plan"),
             URLQueryItem(name: "id", value: "eq.\(userID.uuidString)")
         ])
         let rows: [SupabaseProfileRow] = try await sendRest(endpoint: endpoint, method: "GET", accessToken: accessToken)
-        let plan = rows.first?.plan ?? "free"
-        return plan == "pro" || plan == "business"
+        return rows.first?.plan ?? "free"
+    }
+
+    /// Lädt alle Projektmitglieder, die dieser Nutzer eingeladen hat (projektübergreifend, für Business-Team-Übersicht).
+    func fetchAllMembersInvitedBy(userID: UUID, accessToken: String) async throws -> [ProjectMember] {
+        let endpoint = try endpoint(path: "rest/v1/project_members", query: [
+            URLQueryItem(name: "select", value: "*,projects(name)"),
+            URLQueryItem(name: "invited_by", value: "eq.\(userID.uuidString)"),
+            URLQueryItem(name: "order", value: "created_at.desc")
+        ])
+        let rows: [SupabaseProjectMember] = try await sendRest(endpoint: endpoint, method: "GET", accessToken: accessToken)
+        return rows.map(\.appMember)
     }
 
     /// Setzt `profiles.plan` (nach erfolgreichem App-Kauf) – dieselbe Spalte wie die Website.
@@ -1437,7 +1548,7 @@ struct SupabaseService: Sendable {
 
     func fetchProjects(accessToken: String) async throws -> [Project] {
         let endpoint = try endpoint(path: "rest/v1/projects", query: [
-            URLQueryItem(name: "select", value: "id,user_id,name,status,budget,start_date,end_date,description,progress_by_costs"),
+            URLQueryItem(name: "select", value: "id,user_id,name,status,budget,start_date,end_date,description,progress_by_costs,eigenkapital,kredit"),
             URLQueryItem(name: "order", value: "created_at.desc")
         ])
         let rows: [SupabaseProject] = try await sendRest(endpoint: endpoint, method: "GET", accessToken: accessToken)
@@ -1629,14 +1740,77 @@ struct SupabaseService: Sendable {
         let (data, response) = try await session.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else { throw SupabaseError.invalidResponse }
         guard 200..<300 ~= httpResponse.statusCode else {
-            let error = try? JSONDecoder().decode(SupabaseErrorResponse.self, from: data)
-            throw SupabaseError.requestFailed(error?.message ?? "Supabase-Fehler: HTTP \(httpResponse.statusCode)")
+            if httpResponse.statusCode == 401 { throw SupabaseError.unauthorized }
+            let errResponse = try? JSONDecoder().decode(SupabaseErrorResponse.self, from: data)
+            let message = errResponse?.bestMessage ?? "Supabase-Fehler: HTTP \(httpResponse.statusCode)"
+            // Klare deutsche Fehlermeldung für häufige Auth-Fehler
+            let friendlyMessage: String
+            switch message.lowercased() {
+            case let m where m.contains("invalid login credentials") || m.contains("invalid_credentials"):
+                friendlyMessage = "E-Mail oder Passwort ist falsch."
+            case let m where m.contains("email not confirmed"):
+                friendlyMessage = "Bitte bestätige zuerst deine E-Mail-Adresse."
+            case let m where m.contains("user not found"):
+                friendlyMessage = "Kein Konto mit dieser E-Mail gefunden."
+            case let m where m.contains("too many requests") || m.contains("rate limit"):
+                friendlyMessage = "Zu viele Versuche. Bitte warte kurz und versuche es erneut."
+            default:
+                friendlyMessage = message
+            }
+            throw SupabaseError.requestFailed(friendlyMessage)
         }
         if ResponseBody.self == EmptySupabaseResponse.self, data.isEmpty { return EmptySupabaseResponse() as! ResponseBody }
         do { return try JSONDecoder().decode(ResponseBody.self, from: data) } catch {
             if ResponseBody.self == EmptySupabaseResponse.self { return EmptySupabaseResponse() as! ResponseBody }
             throw SupabaseError.invalidResponse
         }
+    }
+}
+
+struct SupabaseProjectMember: Decodable, Sendable {
+    let id: UUID
+    let projectID: UUID
+    let invitedEmail: String
+    let role: String
+    let status: String
+    let invitedBy: UUID?
+    let projects: EmbeddedProject?
+
+    struct EmbeddedProject: Decodable, Sendable { let name: String }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case projectID = "project_id"
+        case invitedEmail = "invited_email"
+        case role, status
+        case invitedBy = "invited_by"
+        case projects
+    }
+
+    var appMember: ProjectMember {
+        ProjectMember(
+            id: id,
+            projectID: projectID,
+            invitedEmail: invitedEmail,
+            role: MemberRole(rawValue: role) ?? .viewer,
+            status: MemberStatus(rawValue: status) ?? .pending,
+            invitedBy: invitedBy,
+            projectName: projects?.name ?? ""
+        )
+    }
+}
+
+struct NewSupabaseProjectMember: Encodable, Sendable {
+    let projectID: UUID
+    let invitedEmail: String
+    let role: String
+    let invitedBy: UUID
+
+    enum CodingKeys: String, CodingKey {
+        case projectID = "project_id"
+        case invitedEmail = "invited_email"
+        case role
+        case invitedBy = "invited_by"
     }
 }
 
@@ -1668,7 +1842,17 @@ struct SupabaseProfileRow: Decodable, Sendable {
 struct UpdateSupabaseProfilePlan: Encodable, Sendable {
     let plan: String
 }
-private struct SupabaseErrorResponse: Decodable { let message: String? }
+private struct SupabaseErrorResponse: Decodable {
+    let message: String?
+    let errorDescription: String?   // Auth-Endpunkte nutzen "error_description"
+    let error: String?              // Fallback: "error"-Feld
+    enum CodingKeys: String, CodingKey {
+        case message
+        case errorDescription = "error_description"
+        case error
+    }
+    var bestMessage: String? { message ?? errorDescription ?? error }
+}
 private struct EmptySupabaseResponse: Decodable {}
 
 enum BaumioDateFormatter {
@@ -1703,6 +1887,18 @@ extension ProjectStatus {
     }
 }
 
+/// Typsichere Konstanten für Kostenpositions-Status (Supabase-Rohwerte).
+enum CostStatusValue {
+    static let open         = "offen"
+    static let commissioned = "beauftragt"
+    static let paid         = "bezahlt"
+    static let rejected     = "abgelehnt"
+
+    /// true wenn Betrag als beauftragt gilt (beauftragt oder bezahlt)
+    static func isOrdered(_ raw: String) -> Bool { raw == commissioned || raw == paid }
+    static func isPaid(_ raw: String) -> Bool    { raw == paid }
+}
+
 extension WorkStatus {
     init(tradeValue: String?) {
         switch tradeValue {
@@ -1719,6 +1915,15 @@ extension WorkStatus {
         case "abgeschlossen": self = .done
         case "abgesagt": self = .blocked
         default: self = .planned
+        }
+    }
+
+    var appointmentStatusValue: String {
+        switch self {
+        case .planned: "geplant"
+        case .active: "bestaetigt"
+        case .done: "abgeschlossen"
+        case .blocked: "abgesagt"
         }
     }
 }

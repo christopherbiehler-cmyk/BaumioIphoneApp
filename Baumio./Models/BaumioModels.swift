@@ -104,6 +104,11 @@ struct Project: Identifiable, Hashable {
     var progress: Double
     /// Vom Backend berechneter Kosten-Fortschritt (bezahlt/geplant in %).
     var progressByCosts: Int = 0
+    /// Finanzierungsübersicht – Eigenkapital und Baudarlehen (separat von Budget).
+    var eigenkapital: Decimal = 0
+    var kredit: Decimal = 0
+    /// Supabase user_id des Projektbesitzers – nil bedeutet eigenes Projekt (Demo-Modus).
+    var ownerUserID: UUID? = nil
 }
 
 struct Trade: Identifiable, Hashable {
@@ -157,7 +162,7 @@ struct TaskItem: Identifiable, Hashable {
 struct MaterialItem: Identifiable, Hashable {
     var id = UUID()
     var name: String
-    var quantity: Double
+    var quantity: Decimal
     var unit: String
     var supplier: String
     var articleNumber: String
@@ -166,6 +171,7 @@ struct MaterialItem: Identifiable, Hashable {
     var trade: String
     var notes: String
     var fundingItemID: UUID? = nil
+    var url: String = ""
 }
 
 struct PhotoRef: Identifiable, Hashable {
@@ -455,13 +461,44 @@ struct ReviewItem: Identifiable, Hashable {
     var pricePerformance: Int = 0
 }
 
+enum MemberRole: String, CaseIterable, Identifiable {
+    case viewer = "viewer"
+    case editor = "editor"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .viewer: "Leserecht"
+        case .editor: "Vollzugriff"
+        }
+    }
+}
+
+enum MemberStatus: String {
+    case pending = "pending"
+    case accepted = "accepted"
+}
+
+struct ProjectMember: Identifiable, Hashable {
+    var id: UUID
+    var projectID: UUID
+    var invitedEmail: String
+    var role: MemberRole
+    var status: MemberStatus
+    var invitedBy: UUID?
+    var projectName: String = ""
+}
+
 struct PricingPlan: Identifiable, Hashable {
     let id = UUID()
     var name: String
+    var planType: String = ""
     var price: String
     var subtitle: String
     var features: [PricingFeature]
     var buttonTitle: String
+    var buttonSystemImage: String = "person.fill.checkmark"
     var isHighlighted: Bool
 }
 

@@ -1,9 +1,146 @@
 import SwiftUI
+import Charts
 import AuthenticationServices
 import PhotosUI
 import UniformTypeIdentifiers
 import UIKit
 import StoreKit
+import EventKit
+
+// MARK: – App-Tour (nach erstem Login, einmalig)
+
+private struct TourSlide {
+    let icon: String
+    let iconColor: Color
+    let title: String
+    let subtitle: String
+    let bullets: [String]
+}
+
+struct AppTourView: View {
+    @AppStorage("hasSeenAppTour") private var hasSeenAppTour = false
+    @Binding var isPresented: Bool
+    @State private var page = 0
+
+    private let slides: [TourSlide] = [
+        TourSlide(
+            icon: "building.2.crop.circle.fill",
+            iconColor: BaumioTheme.accent,
+            title: "Willkommen bei Baumio",
+            subtitle: "Dein digitaler Bauhelfer – von der ersten Planung bis zur Abnahme.",
+            bullets: [
+                "Projekte, Kosten und Termine zentral verwalten",
+                "Bautagebuch und Dokumente immer dabei",
+                "Deutsch, datenschutzfreundlich, kein Tracking"
+            ]
+        ),
+        TourSlide(
+            icon: "checklist.checked",
+            iconColor: BaumioTheme.info,
+            title: "So startest du",
+            subtitle: "In drei Schritten bist du startklar:",
+            bullets: [
+                "1. Projekt anlegen – unter ‹Projekte› oben rechts",
+                "2. Gewerke und Termine eintragen",
+                "3. Kosten, Rechnungen und Dokumente erfassen"
+            ]
+        ),
+        TourSlide(
+            icon: "star.circle.fill",
+            iconColor: .orange,
+            title: "Pro-Features",
+            subtitle: "Mit Baumio Pro holst du noch mehr raus:",
+            bullets: [
+                "KfW & BAFA Fördertracker – bis 28.000 €",
+                "§35a Export – bis 1.200 € Steuern sparen",
+                "Mängelverwaltung & Übergabeprotokoll",
+                "Angebotsvergleich & Bauleiter einladen"
+            ]
+        )
+    ]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Spacer()
+                Button("Überspringen") { finish() }
+                    .font(.subheadline)
+                    .foregroundStyle(BaumioTheme.secondaryText)
+                    .padding(.horizontal, 24)
+                    .padding(.top, 16)
+            }
+
+            TabView(selection: $page) {
+                ForEach(slides.indices, id: \.self) { i in
+                    tourSlide(slides[i]).tag(i)
+                }
+            }
+            .tabViewStyle(.page(indexDisplayMode: .always))
+            .animation(.easeInOut, value: page)
+
+            VStack(spacing: 12) {
+                if page < slides.count - 1 {
+                    PrimaryButton(title: "Weiter", systemImage: "arrow.right") {
+                        withAnimation { page += 1 }
+                    }
+                } else {
+                    PrimaryButton(title: "Los geht's!", systemImage: "checkmark") {
+                        finish()
+                    }
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 40)
+        }
+        .baumioBackground()
+    }
+
+    private func tourSlide(_ slide: TourSlide) -> some View {
+        ScrollView {
+            VStack(spacing: 28) {
+                Image(systemName: slide.icon)
+                    .font(.system(size: 72))
+                    .foregroundStyle(slide.iconColor)
+                    .padding(.top, 32)
+
+                VStack(spacing: 8) {
+                    Text(slide.title)
+                        .font(.system(.title, design: .rounded, weight: .bold))
+                        .foregroundStyle(BaumioTheme.primaryText)
+                        .multilineTextAlignment(.center)
+                    Text(slide.subtitle)
+                        .font(.body)
+                        .foregroundStyle(BaumioTheme.secondaryText)
+                        .multilineTextAlignment(.center)
+                }
+
+                BaumioCard {
+                    VStack(alignment: .leading, spacing: 14) {
+                        ForEach(slide.bullets, id: \.self) { bullet in
+                            HStack(alignment: .top, spacing: 12) {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(BaumioTheme.success)
+                                    .font(.body)
+                                Text(bullet)
+                                    .font(.subheadline)
+                                    .foregroundStyle(BaumioTheme.primaryText)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 4)
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 20)
+        }
+    }
+
+    private func finish() {
+        hasSeenAppTour = true
+        isPresented = false
+    }
+}
 
 struct OnboardingView: View {
     @Bindable var model: BaumioAppViewModel
@@ -65,7 +202,6 @@ struct AppleSignInButton: View {
         }
         .signInWithAppleButtonStyle(.white)
         .frame(height: 48)
-        .clipShape(RoundedRectangle(cornerRadius: BaumioTheme.controlRadius, style: .continuous))
         .accessibilityLabel("Mit Apple anmelden")
     }
 
@@ -82,9 +218,13 @@ struct AppleSignInButton: View {
             }
             Task { await model.signInWithApple(idToken: token, nonce: nonce) }
         case .failure(let error):
+            let code = (error as? ASAuthorizationError)?.code
             // Abbruch durch den Nutzer nicht als Fehler anzeigen.
-            if (error as? ASAuthorizationError)?.code == .canceled { return }
-            model.authError = error.localizedDescription
+            if code == .canceled { return }
+            // Error 1000 (unknown): Sign in with Apple nicht für diese App aktiviert,
+            // oder kein Apple-Account im Simulator. Auf echten Geräten zeigt das OS selbst einen Hinweis.
+            if code == .unknown { return }
+            model.authError = "Apple-Anmeldung fehlgeschlagen: \(error.localizedDescription)"
         }
     }
 }
@@ -202,6 +342,36 @@ struct DashboardView: View {
                 }
             }
 
+            if !model.pendingInvites.isEmpty {
+                Button {
+                    model.selectedSection = .settings
+                } label: {
+                    BaumioCard {
+                        HStack(spacing: 12) {
+                            Image(systemName: "person.badge.plus")
+                                .font(.title2)
+                                .foregroundStyle(BaumioTheme.accent)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("\(model.pendingInvites.count) offene Projekteinladung\(model.pendingInvites.count == 1 ? "" : "en")")
+                                    .font(.subheadline.bold())
+                                    .foregroundStyle(BaumioTheme.primaryText)
+                                Text("Tippe um einzuladen oder abzulehnen")
+                                    .font(.caption)
+                                    .foregroundStyle(BaumioTheme.secondaryText)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .foregroundStyle(BaumioTheme.secondaryText)
+                        }
+                    }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: BaumioTheme.cardRadius, style: .continuous)
+                            .stroke(BaumioTheme.accent, lineWidth: 1.5)
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+
             if let project = model.selectedProject {
                 BaumioCard {
                     VStack(alignment: .leading, spacing: 14) {
@@ -231,6 +401,10 @@ struct DashboardView: View {
                 }
 
                 ProjectProgressCard(model: model)
+
+                if !model.costs.isEmpty {
+                    BudgetChartCard(model: model)
+                }
 
                 AdaptiveGrid(minimum: 170) {
                     DashboardMetricCard(title: "Projektfortschritt", value: "\(Int(project.progress * 100)) %", subtitle: "Projektwert", systemImage: "chart.line.uptrend.xyaxis")
@@ -268,6 +442,15 @@ struct DashboardView: View {
                         bauberichtExport = ShareableURL(url: url)
                     }
                 }
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Image("BaumioLogoMark")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(height: 28)
+                    .accessibilityHidden(true)
             }
         }
         .sheet(item: $bauberichtExport) { shareable in
@@ -308,6 +491,63 @@ struct ProjectProgressCard: View {
                 }
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel("Erfasste Zeit gesamt: \(model.totalTrackedTimeText)")
+            }
+        }
+    }
+}
+
+struct BudgetChartCard: View {
+    @Bindable var model: BaumioAppViewModel
+
+    private struct ChartEntry: Identifiable {
+        let id = UUID()
+        let label: String
+        let value: Decimal
+        let color: Color
+    }
+
+    private var entries: [ChartEntry] {
+        [
+            ChartEntry(label: "Budget", value: model.selectedProject?.budget ?? 0, color: BaumioTheme.secondaryText.opacity(0.6)),
+            ChartEntry(label: "Geplant", value: model.plannedCosts, color: BaumioTheme.info),
+            ChartEntry(label: "Bestellt", value: model.orderedCosts, color: BaumioTheme.accent),
+            ChartEntry(label: "Bezahlt", value: model.paidCosts, color: BaumioTheme.success)
+        ]
+    }
+
+    var body: some View {
+        BaumioCard {
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Kostenübersicht", systemImage: "chart.bar.fill")
+                    .font(.headline)
+                    .foregroundStyle(BaumioTheme.primaryText)
+
+                Chart(entries) { entry in
+                    BarMark(
+                        x: .value("Kategorie", entry.label),
+                        y: .value("Betrag", NSDecimalNumber(decimal: entry.value).doubleValue)
+                    )
+                    .foregroundStyle(entry.color)
+                    .cornerRadius(4)
+                }
+                .chartYAxis {
+                    AxisMarks { value in
+                        AxisValueLabel {
+                            if let d = value.as(Double.self) {
+                                Text(Decimal(d).euroString)
+                                    .font(.caption2)
+                                    .foregroundStyle(BaumioTheme.secondaryText)
+                            }
+                        }
+                        AxisGridLine().foregroundStyle(BaumioTheme.border)
+                    }
+                }
+                .chartXAxis {
+                    AxisMarks {
+                        AxisValueLabel().foregroundStyle(BaumioTheme.secondaryText)
+                    }
+                }
+                .frame(height: 160)
             }
         }
     }
@@ -376,24 +616,31 @@ struct ProjectsView: View {
                 )
             } else {
                 ForEach(model.projects) { project in
+                    let isOwned = model.isOwner(of: project)
                     BaumioCard {
                         VStack(alignment: .leading, spacing: 10) {
+                            ProjectCoverImage(projectID: project.id)
                             HStack {
                                 Text(project.name).font(.headline).foregroundStyle(BaumioTheme.primaryText)
                                 Spacer()
+                                if !isOwned {
+                                    StatusBadge(title: "Geteilt", color: BaumioTheme.info)
+                                }
                                 if model.selectedProject?.id == project.id {
                                     StatusBadge(title: "Ausgewählt", color: BaumioTheme.accent)
                                 }
                                 StatusBadge(title: project.status.rawValue, color: project.status == .active ? BaumioTheme.success : BaumioTheme.secondaryText)
-                                Menu {
-                                    Button("Bearbeiten") { editingProject = project }
-                                    Button("Löschen", role: .destructive) {
-                                        deletingProject = project
+                                if isOwned {
+                                    Menu {
+                                        Button("Bearbeiten") { editingProject = project }
+                                        Button("Löschen", role: .destructive) {
+                                            deletingProject = project
+                                        }
+                                    } label: {
+                                        Image(systemName: "ellipsis.circle").foregroundStyle(BaumioTheme.secondaryText).font(.title3).frame(width: 44, height: 44)
                                     }
-                                } label: {
-                                    Image(systemName: "ellipsis.circle").foregroundStyle(BaumioTheme.secondaryText).font(.title3).frame(width: 44, height: 44)
+                                    .accessibilityLabel("Projekt bearbeiten oder löschen")
                                 }
-                                .accessibilityLabel("Projekt bearbeiten oder löschen")
                             }
                             Text(project.address).foregroundStyle(BaumioTheme.secondaryText)
                             Text(project.description).font(.subheadline).foregroundStyle(BaumioTheme.secondaryText)
@@ -439,6 +686,19 @@ struct TradesView: View {
     @State private var showingEditor = false
     @State private var showingBizCardScanner = false
     @State private var editingItem: EditingItem?
+    @State private var deletingTrade: Trade?
+    @State private var searchText = ""
+
+    private var filteredTrades: [Trade] {
+        guard !searchText.isEmpty else { return model.trades }
+        let q = searchText.lowercased()
+        return model.trades.filter {
+            $0.company.lowercased().contains(q) ||
+            $0.name.lowercased().contains(q) ||
+            $0.tradeType.lowercased().contains(q) ||
+            $0.notes.lowercased().contains(q)
+        }
+    }
 
     var body: some View {
         ListScreen(title: "Firmen", subtitle: "Handwerksbetriebe, Kontaktdaten und Kosten") {
@@ -505,7 +765,10 @@ struct TradesView: View {
                 .buttonStyle(.plain)
             }
 
-            ForEach(model.trades) { trade in
+            if !model.trades.isEmpty && filteredTrades.isEmpty {
+                ContentUnavailableView.search(text: searchText)
+            }
+            ForEach(filteredTrades) { trade in
                 BaumioCard {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack(alignment: .top) {
@@ -524,7 +787,7 @@ struct TradesView: View {
                             Menu {
                                 Button("Bearbeiten") { editingItem = .trade(trade) }
                                 Button("Löschen", role: .destructive) {
-                                    model.handle { try await model.deleteTrade(trade) }
+                                    deletingTrade = trade
                                 }
                             } label: {
                                 Image(systemName: "ellipsis.circle").foregroundStyle(BaumioTheme.secondaryText).font(.title3).frame(width: 44, height: 44)
@@ -595,6 +858,7 @@ struct TradesView: View {
                 }
             }
         }
+        .searchable(text: $searchText, prompt: "Firma suchen …")
         .sheet(isPresented: $showingEditor) {
             QuickAddView(kind: .trade, model: model)
         }
@@ -604,6 +868,14 @@ struct TradesView: View {
         .sheet(isPresented: $showingBizCardScanner) {
             VisitenkarteScannerSheet(model: model)
         }
+        .alert("Firma löschen?", isPresented: Binding(get: { deletingTrade != nil }, set: { if !$0 { deletingTrade = nil } })) {
+            Button("Abbrechen", role: .cancel) { deletingTrade = nil }
+            Button("Löschen", role: .destructive) {
+                if let t = deletingTrade { model.handle { try await model.deleteTrade(t) }; deletingTrade = nil }
+            }
+        } message: {
+            Text("\(deletingTrade.map { $0.company.isEmpty ? $0.name : $0.company } ?? "diese Firma") wird unwiderruflich gelöscht.")
+        }
     }
 }
 
@@ -612,8 +884,22 @@ struct ScheduleView: View {
     @State private var viewMode = "Liste"
     @State private var showingEditor = false
     @State private var editingItem: EditingItem?
+    @State private var deletingAppointment: ScheduleItem?
     @State private var exportSheet: ShareableURL?
+    @State private var searchText = ""
+    @State private var calendarMessage: String?
+    @State private var showingCalendarAlert = false
     private let modes = ["Liste", "Zeitstrahl"]
+
+    private var filteredSchedule: [ScheduleItem] {
+        guard !searchText.isEmpty else { return model.schedule }
+        let q = searchText.lowercased()
+        return model.schedule.filter {
+            $0.title.lowercased().contains(q) ||
+            $0.trade.lowercased().contains(q) ||
+            $0.notes.lowercased().contains(q)
+        }
+    }
 
     var body: some View {
         ScreenScaffold(title: "Termine & Zeitstrahl", subtitle: "Terminliste und Bauzeitenplan (Gantt)") {
@@ -667,7 +953,17 @@ struct ScheduleView: View {
                     .accessibilityLabel("PDF-Export, erfordert Baumio Pro")
                 }
             } else {
-                ForEach(model.schedule) { item in
+                if !model.schedule.isEmpty {
+                    SecondaryButton(title: "In Kalender exportieren", systemImage: "calendar.badge.plus") {
+                        Task { await exportToCalendar() }
+                    }
+                }
+                if model.schedule.isEmpty {
+                    EmptyStateView(title: "Keine Termine", message: "Lege deinen ersten Termin an.", systemImage: "calendar")
+                } else if filteredSchedule.isEmpty {
+                    ContentUnavailableView.search(text: searchText)
+                }
+                ForEach(filteredSchedule) { item in
                     BaumioCard {
                         VStack(alignment: .leading, spacing: 10) {
                             HStack(alignment: .top) {
@@ -683,7 +979,7 @@ struct ScheduleView: View {
                                 Menu {
                                     Button("Bearbeiten") { editingItem = .appointment(item) }
                                     Button("Löschen", role: .destructive) {
-                                        model.handle { try await model.deleteAppointment(item) }
+                                        deletingAppointment = item
                                     }
                                 } label: {
                                     Image(systemName: "ellipsis.circle").foregroundStyle(BaumioTheme.secondaryText).font(.title3).frame(width: 44, height: 44)
@@ -702,6 +998,7 @@ struct ScheduleView: View {
                 }
             }
         }
+        .searchable(text: $searchText, prompt: "Termin suchen …")
         .sheet(isPresented: $showingEditor) {
             QuickAddView(kind: .appointment, model: model)
         }
@@ -711,6 +1008,81 @@ struct ScheduleView: View {
         .sheet(item: $exportSheet) { shareable in
             ShareSheet(items: [shareable.url])
         }
+        .alert("Kalender-Export", isPresented: $showingCalendarAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(calendarMessage ?? "")
+        }
+        .alert("Termin löschen?", isPresented: Binding(get: { deletingAppointment != nil }, set: { if !$0 { deletingAppointment = nil } })) {
+            Button("Abbrechen", role: .cancel) { deletingAppointment = nil }
+            Button("Löschen", role: .destructive) {
+                if let a = deletingAppointment { model.handle { try await model.deleteAppointment(a) }; deletingAppointment = nil }
+            }
+        } message: {
+            Text("\(deletingAppointment?.title ?? "dieser Termin") wird unwiderruflich gelöscht.")
+        }
+    }
+
+    private func exportToCalendar() async {
+        let store = EKEventStore()
+        do {
+            let granted: Bool
+            if #available(iOS 17, *) {
+                granted = try await store.requestWriteOnlyAccessToEvents()
+            } else {
+                granted = try await store.requestAccess(to: .event)
+            }
+            guard granted else {
+                calendarMessage = "Bitte erlaube Baumio den Zugriff auf deinen Kalender in den Einstellungen."
+                showingCalendarAlert = true
+                return
+            }
+            let calendar = store.defaultCalendarForNewEvents
+            var added = 0
+            for item in filteredSchedule {
+                let marker = "[baumio:\(item.id.uuidString)]"
+                let dayStart = Calendar.current.startOfDay(for: item.date)
+                let windowEnd = Calendar.current.date(byAdding: .day, value: 2, to: dayStart) ?? dayStart
+                let pred = store.predicateForEvents(withStart: dayStart, end: windowEnd, calendars: nil)
+                if store.events(matching: pred).contains(where: { ($0.notes ?? "").contains(marker) }) { continue }
+
+                let event = EKEvent(eventStore: store)
+                event.title = item.title
+                let markerSuffix = item.notes.isEmpty ? marker : "\(item.notes)\n\(marker)"
+                event.notes = markerSuffix
+                event.calendar = calendar
+
+                let isAllDay = item.startTime == nil
+                event.isAllDay = isAllDay
+
+                let startDate: Date
+                if let t = item.startTime {
+                    startDate = Calendar.current.date(bySettingHour: Calendar.current.component(.hour, from: t),
+                                                      minute: Calendar.current.component(.minute, from: t),
+                                                      second: 0, of: item.date) ?? item.date
+                } else {
+                    startDate = Calendar.current.startOfDay(for: item.date)
+                }
+                let endDate: Date
+                if isAllDay {
+                    endDate = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: item.date)) ?? startDate
+                } else if let t = item.endTime {
+                    endDate = Calendar.current.date(bySettingHour: Calendar.current.component(.hour, from: t),
+                                                    minute: Calendar.current.component(.minute, from: t),
+                                                    second: 0, of: item.date) ?? startDate
+                } else {
+                    endDate = Calendar.current.date(byAdding: .hour, value: 1, to: startDate) ?? startDate
+                }
+                event.startDate = startDate
+                event.endDate = endDate
+                try store.save(event, span: .thisEvent)
+                added += 1
+            }
+            calendarMessage = "\(added) Termin\(added == 1 ? "" : "e") in den Kalender exportiert."
+        } catch {
+            calendarMessage = "Fehler: \(error.localizedDescription)"
+        }
+        showingCalendarAlert = true
     }
 }
 
@@ -718,6 +1090,7 @@ struct DiaryView: View {
     @Bindable var model: BaumioAppViewModel
     @State private var showingEditor = false
     @State private var editingItem: EditingItem?
+    @State private var deletingEntry: DiaryEntry?
 
     var body: some View {
         ListScreen(title: "Bautagebuch", subtitle: "Tägliche Einträge, Wetter, Firmen, Fotos und Notizen") {
@@ -732,7 +1105,7 @@ struct DiaryView: View {
                             Menu {
                                 Button("Bearbeiten") { editingItem = .diary(entry) }
                                 Button("Löschen", role: .destructive) {
-                                    model.handle { try await model.deleteDiaryEntry(entry) }
+                                    deletingEntry = entry
                                 }
                             } label: {
                                 Image(systemName: "ellipsis.circle").foregroundStyle(BaumioTheme.secondaryText).font(.title3).frame(width: 44, height: 44)
@@ -756,6 +1129,14 @@ struct DiaryView: View {
         .sheet(item: $editingItem) { item in
             QuickAddView(editing: item, model: model)
         }
+        .alert("Eintrag löschen?", isPresented: Binding(get: { deletingEntry != nil }, set: { if !$0 { deletingEntry = nil } })) {
+            Button("Abbrechen", role: .cancel) { deletingEntry = nil }
+            Button("Löschen", role: .destructive) {
+                if let e = deletingEntry { model.handle { try await model.deleteDiaryEntry(e) }; deletingEntry = nil }
+            }
+        } message: {
+            Text("Der Tagebucheintrag vom \(deletingEntry.map { $0.date.formatted(date: .long, time: .omitted) } ?? "") wird unwiderruflich gelöscht.")
+        }
     }
 }
 
@@ -763,50 +1144,72 @@ struct TasksView: View {
     @Bindable var model: BaumioAppViewModel
     @State private var showingEditor = false
     @State private var editingItem: EditingItem?
+    @State private var deletingTask: TaskItem?
+    @State private var searchText = ""
+
+    private var filteredTasks: [TaskItem] {
+        guard !searchText.isEmpty else { return model.tasks }
+        let q = searchText.lowercased()
+        return model.tasks.filter { $0.title.lowercased().contains(q) || $0.trade.lowercased().contains(q) }
+    }
 
     var body: some View {
         ListScreen(title: "Aufgaben", subtitle: "Prioritäten, Fälligkeiten und Filter") {
             PrimaryButton(title: "Aufgabe anlegen", systemImage: "plus", action: { showingEditor = true })
 
-            ForEach(model.tasks) { task in
+            ForEach(filteredTasks) { task in
                 BaumioCard {
-                    HStack(alignment: .top, spacing: 12) {
-                        Button {
-                            model.handle { try await model.toggleTask(task) }
-                        } label: {
-                            Image(systemName: task.isDone ? "checkmark.circle.fill" : "circle")
-                                .foregroundStyle(task.isDone ? BaumioTheme.success : BaumioTheme.secondaryText)
-                                .font(.title3)
-                                .frame(width: 44, height: 44)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(task.isDone ? "Aufgabe als offen markieren" : "Aufgabe als erledigt markieren")
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(task.title).font(.headline).foregroundStyle(BaumioTheme.primaryText)
-                            Text("\(task.trade) · fällig am \(task.dueDate.formatted(date: .abbreviated, time: .omitted))")
-                                .font(.footnote)
-                                .foregroundStyle(BaumioTheme.secondaryText)
-                            StatusBadge(title: task.priority.rawValue, color: priorityColor(task.priority))
-                        }
-                        Spacer()
-                        Menu {
-                            Button("Bearbeiten") { editingItem = .task(task) }
-                            Button("Löschen", role: .destructive) {
-                                model.handle { try await model.deleteTask(task) }
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(alignment: .top, spacing: 12) {
+                            Button {
+                                model.handle { try await model.toggleTask(task) }
+                            } label: {
+                                Image(systemName: task.isDone ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(task.isDone ? BaumioTheme.success : BaumioTheme.secondaryText)
+                                    .font(.title3)
+                                    .frame(width: 44, height: 44)
                             }
-                        } label: {
-                            Image(systemName: "ellipsis.circle").foregroundStyle(BaumioTheme.secondaryText).font(.title3).frame(width: 44, height: 44)
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(task.isDone ? "Aufgabe als offen markieren" : "Aufgabe als erledigt markieren")
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(task.title).font(.headline).foregroundStyle(BaumioTheme.primaryText)
+                                Text("\(task.trade) · fällig am \(task.dueDate.formatted(date: .abbreviated, time: .omitted))")
+                                    .font(.footnote)
+                                    .foregroundStyle(BaumioTheme.secondaryText)
+                                StatusBadge(title: task.priority.rawValue, color: priorityColor(task.priority))
+                            }
+                            Spacer()
+                            Menu {
+                                Button("Bearbeiten") { editingItem = .task(task) }
+                                Button("Löschen", role: .destructive) {
+                                    deletingTask = task
+                                }
+                            } label: {
+                                Image(systemName: "ellipsis.circle").foregroundStyle(BaumioTheme.secondaryText).font(.title3).frame(width: 44, height: 44)
+                            }
+                            .accessibilityLabel("Aufgabe bearbeiten oder löschen")
                         }
-                        .accessibilityLabel("Aufgabe bearbeiten oder löschen")
+                        PhotoSection(model: model, bucket: "task-photos", photos: model.taskPhotos[task.id] ?? []) { data in
+                            model.handle { try await model.addTaskPhoto(task, imageData: data) }
+                        }
                     }
                 }
             }
         }
+        .searchable(text: $searchText, prompt: "Aufgabe suchen …")
         .sheet(isPresented: $showingEditor) {
             QuickAddView(kind: .task, model: model)
         }
         .sheet(item: $editingItem) { item in
             QuickAddView(editing: item, model: model)
+        }
+        .alert("Aufgabe löschen?", isPresented: Binding(get: { deletingTask != nil }, set: { if !$0 { deletingTask = nil } })) {
+            Button("Abbrechen", role: .cancel) { deletingTask = nil }
+            Button("Löschen", role: .destructive) {
+                if let t = deletingTask { model.handle { try await model.deleteTask(t) }; deletingTask = nil }
+            }
+        } message: {
+            Text("\(deletingTask?.title ?? "diese Aufgabe") wird unwiderruflich gelöscht.")
         }
     }
 }
@@ -815,6 +1218,7 @@ struct MaterialsView: View {
     @Bindable var model: BaumioAppViewModel
     @State private var showingEditor = false
     @State private var editingItem: EditingItem?
+    @State private var deletingMaterial: MaterialItem?
     @State private var searchText = ""
     @State private var statusFilter = "Alle"
     @State private var supplierFilter = "Alle"
@@ -880,7 +1284,7 @@ struct MaterialsView: View {
                             Menu {
                                 Button("Bearbeiten") { editingItem = .material(material) }
                                 Button("Löschen", role: .destructive) {
-                                    model.handle { try await model.deleteMaterial(material) }
+                                    deletingMaterial = material
                                 }
                             } label: {
                                 Image(systemName: "ellipsis.circle").foregroundStyle(BaumioTheme.secondaryText).font(.title3).frame(width: 44, height: 44)
@@ -905,6 +1309,13 @@ struct MaterialsView: View {
                         if !material.articleNumber.isEmpty {
                             Text("Artikelnummer: \(material.articleNumber)").font(.footnote).foregroundStyle(BaumioTheme.secondaryText)
                         }
+                        if !material.url.isEmpty, let url = URL(string: material.url) {
+                            Link(destination: url) {
+                                Label("Produktlink öffnen", systemImage: "link")
+                                    .font(.footnote.bold())
+                                    .foregroundStyle(BaumioTheme.accent)
+                            }
+                        }
                         Text(material.notes).font(.footnote).foregroundStyle(BaumioTheme.secondaryText)
                     }
                 }
@@ -915,6 +1326,14 @@ struct MaterialsView: View {
         }
         .sheet(item: $editingItem) { item in
             QuickAddView(editing: item, model: model)
+        }
+        .alert("Material löschen?", isPresented: Binding(get: { deletingMaterial != nil }, set: { if !$0 { deletingMaterial = nil } })) {
+            Button("Abbrechen", role: .cancel) { deletingMaterial = nil }
+            Button("Löschen", role: .destructive) {
+                if let m = deletingMaterial { model.handle { try await model.deleteMaterial(m) }; deletingMaterial = nil }
+            }
+        } message: {
+            Text("\(deletingMaterial?.name ?? "dieses Material") wird unwiderruflich gelöscht.")
         }
     }
 }
@@ -1154,7 +1573,8 @@ struct HandoverView: View {
 
     private func exportChecklistAsJSON() -> URL? {
         let items = model.handoverItems.map { entry -> [String: String] in
-            ["item": entry.item, "room": entry.room, "tradeType": entry.tradeType, "notes": entry.notes]
+            ["item": entry.item, "room": entry.room, "tradeType": entry.tradeType, "notes": entry.notes,
+             "status": entry.status.supabaseValue, "isDone": entry.isDone ? "true" : "false"]
         }
         let wrapper: [String: Any] = [
             "name": model.selectedProject?.name ?? "Meine Checkliste",
@@ -1162,8 +1582,8 @@ struct HandoverView: View {
             "items": items
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: wrapper, options: .prettyPrinted) else { return nil }
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("Baumio_Checkliste.json")
-        try? data.write(to: url)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("Baumio_Checkliste_\(Int(Date().timeIntervalSince1970)).json")
+        do { try data.write(to: url) } catch { return nil }
         return url
     }
 
@@ -1266,6 +1686,10 @@ struct HandoverTemplateSheet: View {
 
     private func importFromJSON(_ result: Result<URL, Error>) {
         importError = nil
+        guard model.isPro else {
+            importError = "JSON-Import ist ab Baumio Pro verfügbar."
+            return
+        }
         switch result {
         case .failure:
             importError = "Datei konnte nicht geöffnet werden."
@@ -1278,9 +1702,11 @@ struct HandoverTemplateSheet: View {
                 importError = "Ungültiges Format. Erwartet: Baumio-JSON mit \"items\"-Array."
                 return
             }
-            let entries = rawItems.compactMap { dict -> (item: String, room: String, trade: String)? in
+            let wasTruncated = rawItems.count > 200
+            let limitedItems = Array(rawItems.prefix(200))
+            let entries = limitedItems.compactMap { dict -> (item: String, room: String, trade: String, status: String)? in
                 guard let item = dict["item"], !item.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
-                return (item: item, room: dict["room"] ?? "", trade: dict["tradeType"] ?? "")
+                return (item: item, room: dict["room"] ?? "", trade: dict["tradeType"] ?? "", status: dict["status"] ?? "offen")
             }
             guard !entries.isEmpty else {
                 importError = "Keine gültigen Prüfpunkte gefunden."
@@ -1288,13 +1714,25 @@ struct HandoverTemplateSheet: View {
             }
             isLoading = true
             Task {
-                do {
-                    for entry in entries {
+                var created = 0
+                var firstError: String?
+                for entry in entries {
+                    do {
                         try await model.createHandoverItem(item: entry.item, room: entry.room, tradeType: entry.trade)
+                        created += 1
+                        if entry.status != "offen", let last = model.handoverItems.last {
+                            try? await model.updateHandoverStatus(last, status: HandoverStatus(supabaseValue: entry.status))
+                        }
+                    } catch {
+                        if firstError == nil { firstError = error.localizedDescription }
                     }
-                    loadedTemplate = "Import (\(entries.count) Punkte geladen)"
-                } catch {
-                    importError = error.localizedDescription
+                }
+                if let err = firstError {
+                    importError = "\(created) von \(entries.count) Punkten importiert. Fehler: \(err)"
+                } else if wasTruncated {
+                    loadedTemplate = "\(created) Punkte geladen (Datei hatte \(rawItems.count) Einträge, max. 200)"
+                } else {
+                    loadedTemplate = "Import (\(created) Punkte geladen)"
                 }
                 isLoading = false
             }
@@ -1563,6 +2001,20 @@ struct CostsView: View {
     @State private var showingEditor = false
     @State private var editingItem: EditingItem?
     @State private var showingScanner = false
+    @State private var deletingCost: CostItem?
+    @State private var searchText = ""
+
+    private var filteredCosts: [CostItem] {
+        guard !searchText.isEmpty else { return model.costs }
+        let q = searchText.lowercased()
+        return model.costs.filter {
+            $0.title.lowercased().contains(q) ||
+            $0.category.lowercased().contains(q) ||
+            $0.trade.lowercased().contains(q) ||
+            $0.supplier.lowercased().contains(q) ||
+            $0.invoiceReference.lowercased().contains(q)
+        }
+    }
 
     var body: some View {
         ScreenScaffold(title: "Kosten", subtitle: "Budgetvergleich und Rechnungen") {
@@ -1601,7 +2053,13 @@ struct CostsView: View {
                     DashboardMetricCard(title: "Bestellt", value: model.orderedCosts.euroString, subtitle: "aktuelle Aufträge", systemImage: "cart")
                     DashboardMetricCard(title: "Bezahlt", value: model.paidCosts.euroString, subtitle: "Rechnungen bezahlt", systemImage: "checkmark.seal", tint: BaumioTheme.success)
                 }
-                ForEach(model.costs) { cost in
+                if let project = model.selectedProject, project.eigenkapital > 0 || project.kredit > 0 || !model.funding.isEmpty {
+                    FinanzierungsCard(project: project, foerderungSumme: model.funding.reduce(0) { $0 + $1.maxAmount }, geplanteSumme: model.plannedCosts)
+                }
+                if !model.costs.isEmpty && filteredCosts.isEmpty {
+                    ContentUnavailableView.search(text: searchText)
+                }
+                ForEach(filteredCosts) { cost in
                     let overBudget = cost.paid > cost.planned && cost.planned > 0
                     BaumioCard {
                         VStack(alignment: .leading, spacing: 8) {
@@ -1614,7 +2072,7 @@ struct CostsView: View {
                                 Menu {
                                     Button("Bearbeiten") { editingItem = .cost(cost) }
                                     Button("Löschen", role: .destructive) {
-                                        model.handle { try await model.deleteCost(cost) }
+                                        deletingCost = cost
                                     }
                                 } label: {
                                     Image(systemName: "ellipsis.circle").foregroundStyle(BaumioTheme.secondaryText).font(.title3).frame(width: 44, height: 44)
@@ -1661,6 +2119,9 @@ struct CostsView: View {
                                 .font(.caption)
                                 .foregroundStyle(BaumioTheme.success)
                             }
+                            PhotoSection(model: model, bucket: "cost-photos", photos: model.costPhotos[cost.id] ?? []) { data in
+                                model.handle { try await model.addCostPhoto(cost, imageData: data) }
+                            }
                         }
                     }
                     .overlay(alignment: .leading) {
@@ -1697,6 +2158,7 @@ struct CostsView: View {
                 }
             }
         }
+        .searchable(text: $searchText, prompt: "Kosten suchen …")
         .sheet(isPresented: $showingEditor) {
             QuickAddView(kind: .cost, model: model)
         }
@@ -1705,6 +2167,14 @@ struct CostsView: View {
         }
         .sheet(isPresented: $showingScanner) {
             DocumentScannerSheet(docType: .rechnung, model: model)
+        }
+        .alert("Kostenposition löschen?", isPresented: Binding(get: { deletingCost != nil }, set: { if !$0 { deletingCost = nil } })) {
+            Button("Abbrechen", role: .cancel) { deletingCost = nil }
+            Button("Löschen", role: .destructive) {
+                if let c = deletingCost { model.handle { try await model.deleteCost(c) }; deletingCost = nil }
+            }
+        } message: {
+            Text("\(deletingCost?.title ?? "diese Position") wird unwiderruflich gelöscht.")
         }
     }
 
@@ -1764,12 +2234,10 @@ struct OffersView: View {
             }
 
             if !ungroupedOffers.isEmpty {
-                if !groupedOffers.isEmpty {
-                    Text("Einzelangebote")
-                        .font(.headline)
-                        .foregroundStyle(BaumioTheme.primaryText)
-                        .padding(.top, 4)
-                }
+                Text(groupedOffers.isEmpty ? "Angebote" : "Einzelangebote")
+                    .font(.headline)
+                    .foregroundStyle(BaumioTheme.primaryText)
+                    .padding(.top, 4)
                 ForEach(ungroupedOffers) { offer in
                     BaumioCard {
                         VStack(alignment: .leading, spacing: 6) {
@@ -2031,6 +2499,9 @@ struct DocumentScannerSheet: View {
     @State private var showingFilePicker = false
     @State private var errorMessage: String?
     @State private var isSaving = false
+    @State private var scannedImageData: Data?
+    @State private var scannedMimeType: String = "image/jpeg"
+    @State private var saveAsDocument = true
 
     // Rechnung-Felder
     @State private var rFirma = ""
@@ -2197,6 +2668,10 @@ struct DocumentScannerSheet: View {
             if let errorMessage {
                 Section { Text(errorMessage).foregroundStyle(BaumioTheme.warning) }
             }
+            Section {
+                Toggle("Scan als Dokument speichern", isOn: $saveAsDocument)
+                    .tint(BaumioTheme.accent)
+            }
             if docType == .rechnung {
                 Section("Erkannte Felder – bitte prüfen") {
                     LabeledContent("Firma") {
@@ -2291,6 +2766,8 @@ struct DocumentScannerSheet: View {
                 let result = try await model.scanAngebot(imageData: finalData, mimeType: finalMime)
                 prefillAngebot(result)
             }
+            scannedImageData = finalData
+            scannedMimeType = finalMime
             step = .confirming
         } catch {
             errorMessage = error.localizedDescription
@@ -2340,6 +2817,11 @@ struct DocumentScannerSheet: View {
                     laborAmount: labor,
                     travelAmount: fahrt
                 )
+                if saveAsDocument, let data = scannedImageData {
+                    let ext = scannedMimeType.contains("pdf") ? "pdf" : "jpg"
+                    let docName = rFirma.isEmpty ? "Rechnung" : "Rechnung \(rFirma)"
+                    try? await model.uploadDocument(name: docName, docType: "rechnung", data: data, contentType: scannedMimeType, fileExtension: ext)
+                }
             } else {
                 let betrag = Decimal(string: aBetrag.replacingOccurrences(of: ",", with: ".")) ?? 0
                 try await model.createOffer(
@@ -2351,6 +2833,11 @@ struct DocumentScannerSheet: View {
                     notes: aNotes,
                     scope: aScope
                 )
+                if saveAsDocument, let data = scannedImageData {
+                    let ext = scannedMimeType.contains("pdf") ? "pdf" : "jpg"
+                    let docName = aFirma.isEmpty ? "Angebot" : "Angebot \(aFirma)"
+                    try? await model.uploadDocument(name: docName, docType: "angebot", data: data, contentType: scannedMimeType, fileExtension: ext)
+                }
             }
             dismiss()
         } catch {
@@ -2483,6 +2970,36 @@ struct RemoteThumbnail: View {
     }
 }
 
+/// Titelbild eines Projekts aus lokalem FileManager-Cache.
+struct ProjectCoverImage: View {
+    let projectID: UUID
+    @State private var image: UIImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 140)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .listRowInsets(EdgeInsets())
+            }
+        }
+        .task(id: projectID) { await loadImageAsync() }
+    }
+
+    private func loadImageAsync() async {
+        let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("project_cover_\(projectID.uuidString).jpg")
+        let loaded = await Task.detached(priority: .background) {
+            (try? Data(contentsOf: url)).flatMap { UIImage(data: $0) }
+        }.value
+        image = loaded
+    }
+}
+
 /// Foto-Streifen mit Hinzufügen-Button (komprimiert vor dem Upload).
 struct PhotoSection: View {
     @Bindable var model: BaumioAppViewModel
@@ -2539,9 +3056,11 @@ struct DefectsView: View {
     @Bindable var model: BaumioAppViewModel
     @State private var showingEditor = false
     @State private var editingItem: EditingItem?
+    @State private var deletingDefect: DefectItem?
     @State private var exportSheet: ShareableURL?
     @State private var tradeFilter = "Alle"
     @State private var statusFilter = "Alle"
+    @State private var searchText = ""
 
     private var tradeOptions: [String] {
         let names = model.defects.map(\.trade).filter { !$0.isEmpty }
@@ -2552,7 +3071,11 @@ struct DefectsView: View {
         model.defects.filter { d in
             let matchesTrade = tradeFilter == "Alle" || d.trade == tradeFilter
             let matchesStatus = statusFilter == "Alle" || d.status == statusFilter
-            return matchesTrade && matchesStatus
+            let matchesSearch = searchText.isEmpty ||
+                d.title.lowercased().contains(searchText.lowercased()) ||
+                d.description.lowercased().contains(searchText.lowercased()) ||
+                d.responsible.lowercased().contains(searchText.lowercased())
+            return matchesTrade && matchesStatus && matchesSearch
         }
     }
 
@@ -2591,7 +3114,7 @@ struct DefectsView: View {
                             Menu {
                                 Button("Bearbeiten") { editingItem = .defect(defect) }
                                 Button("Löschen", role: .destructive) {
-                                    model.handle { try await model.deleteDefect(defect) }
+                                    deletingDefect = defect
                                 }
                             } label: {
                                 Image(systemName: "ellipsis.circle").foregroundStyle(BaumioTheme.secondaryText).font(.title3).frame(width: 44, height: 44)
@@ -2632,6 +3155,7 @@ struct DefectsView: View {
                 }
             }
         }
+        .searchable(text: $searchText, prompt: "Mangel suchen …")
         .sheet(isPresented: $showingEditor) {
             QuickAddView(kind: .defect, model: model)
         }
@@ -2641,6 +3165,14 @@ struct DefectsView: View {
         .sheet(item: $exportSheet) { shareable in
             ShareSheet(items: [shareable.url])
         }
+        .alert("Mangel löschen?", isPresented: Binding(get: { deletingDefect != nil }, set: { if !$0 { deletingDefect = nil } })) {
+            Button("Abbrechen", role: .cancel) { deletingDefect = nil }
+            Button("Löschen", role: .destructive) {
+                if let d = deletingDefect { model.handle { try await model.deleteDefect(d) }; deletingDefect = nil }
+            }
+        } message: {
+            Text("\(deletingDefect?.title ?? "dieser Mangel") wird unwiderruflich gelöscht.")
+        }
     }
 }
 
@@ -2648,6 +3180,7 @@ struct FundingView: View {
     @Bindable var model: BaumioAppViewModel
     @State private var showingEditor = false
     @State private var editingItem: FundingItem?
+    @State private var deletingFunding: FundingItem?
 
     var body: some View {
         ScreenScaffold(title: "Fördertracker", subtitle: "KfW 261 / 455, BAFA BEG EM, Fristen und Beträge") {
@@ -2679,7 +3212,7 @@ struct FundingView: View {
                                 Menu {
                                     Button("Bearbeiten") { editingItem = item }
                                     Button("Löschen", role: .destructive) {
-                                        model.handle { try await model.deleteFunding(item) }
+                                        deletingFunding = item
                                     }
                                 } label: {
                                     Image(systemName: "ellipsis.circle").foregroundStyle(BaumioTheme.secondaryText).font(.title3).frame(width: 44, height: 44)
@@ -2791,6 +3324,14 @@ struct FundingView: View {
         }
         .sheet(item: $editingItem) { item in
             FundingEditorView(model: model, editing: item)
+        }
+        .alert("Förderung löschen?", isPresented: Binding(get: { deletingFunding != nil }, set: { if !$0 { deletingFunding = nil } })) {
+            Button("Abbrechen", role: .cancel) { deletingFunding = nil }
+            Button("Löschen", role: .destructive) {
+                if let f = deletingFunding { model.handle { try await model.deleteFunding(f) }; deletingFunding = nil }
+            }
+        } message: {
+            Text("\(deletingFunding?.name ?? "diese Förderung") wird unwiderruflich gelöscht.")
         }
     }
 }
@@ -3121,6 +3662,7 @@ struct ReviewsView: View {
     @Bindable var model: BaumioAppViewModel
     @State private var showingEditor = false
     @State private var editingReview: ReviewItem?
+    @State private var deletingReview: ReviewItem?
 
     var body: some View {
         ListScreen(title: "Bewertungen", subtitle: "Handwerker bewerten und Weiterempfehlung festhalten") {
@@ -3143,7 +3685,7 @@ struct ReviewsView: View {
                                 Menu {
                                     Button("Bearbeiten") { editingReview = review }
                                     Button("Löschen", role: .destructive) {
-                                        model.handle { try await model.deleteReview(review) }
+                                        deletingReview = review
                                     }
                                 } label: {
                                     Image(systemName: "ellipsis.circle").foregroundStyle(BaumioTheme.secondaryText).font(.title3).frame(width: 44, height: 44)
@@ -3164,6 +3706,14 @@ struct ReviewsView: View {
         }
         .sheet(item: $editingReview) { review in
             ReviewEditorView(model: model, editing: review)
+        }
+        .alert("Bewertung löschen?", isPresented: Binding(get: { deletingReview != nil }, set: { if !$0 { deletingReview = nil } })) {
+            Button("Abbrechen", role: .cancel) { deletingReview = nil }
+            Button("Löschen", role: .destructive) {
+                if let r = deletingReview { model.handle { try await model.deleteReview(r) }; deletingReview = nil }
+            }
+        } message: {
+            Text("Die Bewertung von \(deletingReview?.company ?? "dieser Firma") wird unwiderruflich gelöscht.")
         }
     }
 }
@@ -3268,23 +3818,40 @@ struct ReviewEditorView: View {
 
 struct PricingView: View {
     @Bindable var model: BaumioAppViewModel
+    @Environment(\.openURL) private var openURL
+
+    private var subtitle: String {
+        if model.isBusiness { return "Baumio Business ist aktiv" }
+        if model.isPro { return "Baumio Pro ist aktiv" }
+        return "14 Tage kostenlos testen, danach \(model.store.proDisplayPrice)/Monat"
+    }
 
     var body: some View {
-        ScreenScaffold(title: "Abo", subtitle: model.isPro ? "Baumio Pro ist aktiv" : "14 Tage kostenlos testen, danach \(model.store.proDisplayPrice)/Monat") {
-            if model.isPro {
+        ScreenScaffold(title: "Abo", subtitle: subtitle) {
+            if model.isBusiness {
+                BaumioCard {
+                    HStack {
+                        Label("Baumio Business ist aktiv", systemImage: "building.2.fill")
+                            .font(.headline)
+                            .foregroundStyle(BaumioTheme.primaryText)
+                        Spacer()
+                        StatusBadge(title: "Business", color: BaumioTheme.accent)
+                    }
+                }
+            } else if model.isPro {
                 BaumioCard {
                     HStack {
                         Label("Baumio Pro ist aktiv", systemImage: "crown.fill")
                             .font(.headline)
                             .foregroundStyle(BaumioTheme.primaryText)
                         Spacer()
-                        StatusBadge(title: "Aktiv", color: BaumioTheme.success)
+                        StatusBadge(title: "Pro", color: BaumioTheme.success)
                     }
                 }
             }
 
             AdaptiveGrid(minimum: 280) {
-                ForEach(model.pricingPlans) { plan in
+                ForEach(model.pricingPlans.filter { $0.planType != "business" }) { plan in
                     PricingCard(plan: plan) {
                         model.choosePlan(plan)
                     }
@@ -3400,6 +3967,8 @@ struct SettingsView: View {
     @State private var showingDeleteConfirm = false
     @State private var deleteError: String?
     @State private var showingProfileEditor = false
+    @State private var showingMembers = false
+    @State private var showingTeamOverview = false
     @State private var dsgvoExport: ShareableURL?
     @Environment(\.requestReview) private var requestReview
 
@@ -3422,6 +3991,45 @@ struct SettingsView: View {
 
             SettingsRow(icon: "globe", title: "Sprache", subtitle: "Deutsch")
             SettingsRow(icon: "moon.fill", title: "Darstellung", subtitle: "Folgt den Systemeinstellungen")
+
+            Button {
+                model.handle { try await model.loadProjectMembers() }
+                showingMembers = true
+            } label: {
+                HStack {
+                    SettingsRow(
+                        icon: "person.2",
+                        title: "Projektmitglieder",
+                        subtitle: model.projectMembers.isEmpty ? "Personen zum Projekt einladen" : "\(model.projectMembers.count) Mitglied\(model.projectMembers.count == 1 ? "" : "er")"
+                    )
+                    if !model.pendingInvites.isEmpty {
+                        Text("\(model.pendingInvites.count)")
+                            .font(.caption2.bold())
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(BaumioTheme.danger)
+                            .clipShape(Capsule())
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .sheet(isPresented: $showingMembers) {
+                MembersView(model: model)
+            }
+
+            if model.isBusiness {
+                Button {
+                    model.handle { try await model.loadAllTeamMembers() }
+                    showingTeamOverview = true
+                } label: {
+                    SettingsRow(icon: "person.3.fill", title: "Team-Übersicht", subtitle: "Alle Mitglieder aller Projekte")
+                }
+                .buttonStyle(.plain)
+                .sheet(isPresented: $showingTeamOverview) {
+                    TeamOverviewView(model: model)
+                }
+            }
 
             Text("Rechtliches")
                 .font(.caption.bold())
@@ -3964,6 +4572,10 @@ struct QuickAddView: View {
     @State private var appointmentEndTime: Date
     @State private var isSaving = false
     @State private var errorMessage: String?
+    @State private var quickAddPhotoData: Data?
+    @State private var quickAddPhotoItem: PhotosPickerItem?
+    @State private var showingQuickAddCamera = false
+    @State private var materialURL: String = ""
 
     init(kind: QuickAddKind, model: BaumioAppViewModel) {
         self.kind = kind
@@ -4143,6 +4755,9 @@ struct QuickAddView: View {
             costPaymentDate = item.paymentDate ?? Date()
         }
 
+        let initialMaterialURL: String
+        if case .material(let item) = editing { initialMaterialURL = item.url } else { initialMaterialURL = "" }
+
         _title = State(initialValue: title)
         _secondary = State(initialValue: secondary)
         _amount = State(initialValue: amount)
@@ -4179,6 +4794,10 @@ struct QuickAddView: View {
         _isAllDay = State(initialValue: isAllDay)
         _appointmentStartTime = State(initialValue: appointmentStartTime)
         _appointmentEndTime = State(initialValue: appointmentEndTime)
+        _materialURL = State(initialValue: initialMaterialURL)
+        _quickAddPhotoData = State(initialValue: nil)
+        _quickAddPhotoItem = State(initialValue: nil)
+        _showingQuickAddCamera = State(initialValue: false)
     }
 
     private var navigationTitle: String {
@@ -4259,6 +4878,10 @@ struct QuickAddView: View {
                         TextField("Lieferant", text: $supplier)
                         TextField("Artikelnummer", text: $articleNumber)
                         TextField("Preis/Einheit (€)", text: $secondary)
+                        TextField("Produktlink (optional)", text: $materialURL)
+                            .keyboardType(.URL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
                         Picker("Status", selection: $status) {
                             Text("Geplant").tag("geplant")
                             Text("Bestellt").tag("bestellt")
@@ -4334,6 +4957,38 @@ struct QuickAddView: View {
                             Text("Erhalten").tag("Erhalten")
                             Text("Angenommen").tag("Angenommen")
                             Text("Abgelehnt").tag("Abgelehnt")
+                        }
+                    }
+
+                    if kind == .defect || kind == .diary || kind == .cost || kind == .task {
+                        if let data = quickAddPhotoData, let uiImage = UIImage(data: data) {
+                            Image(uiImage: uiImage)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(maxHeight: 180)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                        HStack(spacing: 16) {
+                            if CameraCapturePicker.isAvailable {
+                                Button { showingQuickAddCamera = true } label: {
+                                    Label("Kamera", systemImage: "camera")
+                                        .font(.footnote.bold())
+                                        .foregroundStyle(BaumioTheme.accent)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            PhotosPicker(selection: $quickAddPhotoItem, matching: .images) {
+                                Label("Foto wählen", systemImage: "photo")
+                                    .font(.footnote.bold())
+                                    .foregroundStyle(BaumioTheme.accent)
+                            }
+                            if quickAddPhotoData != nil {
+                                Button(role: .destructive) { quickAddPhotoData = nil } label: {
+                                    Image(systemName: "trash")
+                                        .foregroundStyle(BaumioTheme.danger)
+                                }
+                                .buttonStyle(.plain)
+                            }
                         }
                     }
 
@@ -4446,10 +5101,28 @@ struct QuickAddView: View {
             }
         }
         .baumioBackground()
+        .sheet(isPresented: $showingQuickAddCamera) {
+            CameraCapturePicker { data in
+                quickAddPhotoData = ImageCompression.compressedJPEG(from: data) ?? data
+            }
+        }
+        .onChange(of: quickAddPhotoItem) { _, newItem in
+            guard let newItem else { return }
+            Task {
+                if let data = try? await newItem.loadTransferable(type: Data.self) {
+                    quickAddPhotoData = ImageCompression.compressedJPEG(from: data) ?? data
+                }
+                quickAddPhotoItem = nil
+            }
+        }
     }
 
     private func save() async {
         errorMessage = nil
+        if kind == .appointment && !isAllDay && appointmentEndTime <= appointmentStartTime {
+            errorMessage = "Die Endzeit muss nach der Startzeit liegen."
+            return
+        }
         isSaving = true
         defer { isSaving = false }
 
@@ -4473,13 +5146,15 @@ struct QuickAddView: View {
         case .appointment:
             try await model.createAppointment(title: title, date: date, notes: notes, startTime: isAllDay ? nil : appointmentStartTime, endTime: isAllDay ? nil : appointmentEndTime, status: status, dependsOn: dependsOnID)
         case .diary:
-            try await model.createDiaryEntry(date: date, notes: title, weather: secondary.isEmpty ? "bewölkt" : secondary, temperature: Int(temperature), presentTrades: supplier)
+            let createdDiary = try await model.createDiaryEntry(date: date, notes: title, weather: secondary.isEmpty ? "bewölkt" : secondary, temperature: Int(temperature), presentTrades: supplier)
+            if let data = quickAddPhotoData { try? await model.addDiaryPhoto(createdDiary, imageData: data) }
         case .task:
-            try await model.createTask(title: title, priority: status == "geplant" ? "normal" : status, dueDate: date)
+            let createdTask = try await model.createTask(title: title, priority: status == "geplant" ? "normal" : status, dueDate: date)
+            if let data = quickAddPhotoData { try? await model.addTaskPhoto(createdTask, imageData: data) }
         case .material:
-            try await model.createMaterial(name: title, quantity: decimal(amount, fallback: 1), unit: unit, supplier: supplier, articleNumber: articleNumber, price: decimal(secondary), status: status, orderDate: date, deliveryDate: endDate, notes: notes, fundingItemID: fundingItemID)
+            try await model.createMaterial(name: title, quantity: decimal(amount, fallback: 1), unit: unit, supplier: supplier, articleNumber: articleNumber, price: decimal(secondary), status: status, orderDate: date, deliveryDate: endDate, notes: notes, fundingItemID: fundingItemID, url: materialURL)
         case .cost:
-            try await model.createCost(
+            let createdCost = try await model.createCost(
                 title: title, amount: decimal(amount), category: category,
                 status: status == "geplant" ? "offen" : status,
                 invoiceReference: invoiceReference, notes: notes, fundingItemID: fundingItemID,
@@ -4492,10 +5167,12 @@ struct QuickAddView: View {
                 paymentDate: isInvoice ? costPaymentDate : nil,
                 supplier: supplier
             )
+            if let data = quickAddPhotoData { try? await model.addCostPhoto(createdCost, imageData: data) }
         case .offer:
             try await model.createOffer(title: title, company: secondary, amount: decimal(amount), validUntil: endDate, status: status, notes: notes, fundingItemID: fundingItemID, scope: offerScope)
         case .defect:
-            try await model.createDefect(description: title, trade: defectTrade, responsible: defectResponsible, deadline: defectDeadline, severity: severity, importance: importance, status: status)
+            let createdDefect = try await model.createDefect(description: title, trade: defectTrade, responsible: defectResponsible, deadline: defectDeadline, severity: severity, importance: importance, status: status)
+            if let data = quickAddPhotoData { try? await model.addDefectPhoto(createdDefect, imageData: data) }
         case .timeLog:
             let totalMinutes = (Int(hours) ?? 0) * 60 + (Int(minutes) ?? 0)
             guard totalMinutes > 0 else {
@@ -4524,7 +5201,7 @@ struct QuickAddView: View {
         case .task(let item):
             try await model.updateTask(item, title: title, priority: status == "geplant" ? "normal" : status, dueDate: date)
         case .material(let item):
-            try await model.updateMaterial(item, name: title, quantity: decimal(amount, fallback: 1), unit: unit, supplier: supplier, articleNumber: articleNumber, price: decimal(secondary), status: status, notes: notes, fundingItemID: fundingItemID)
+            try await model.updateMaterial(item, name: title, quantity: decimal(amount, fallback: 1), unit: unit, supplier: supplier, articleNumber: articleNumber, price: decimal(secondary), status: status, notes: notes, fundingItemID: fundingItemID, url: materialURL)
         case .cost(let item):
             try await model.updateCost(
                 item, title: title, amount: decimal(amount), category: category,
@@ -4569,12 +5246,49 @@ struct ProjectEditorView: View {
     @State private var status: ProjectStatus = .planned
     @State private var startDate = Date()
     @State private var endDate = Date().addingTimeInterval(60 * 60 * 24 * 180)
+    @State private var eigenkapital = ""
+    @State private var kredit = ""
     @State private var isSaving = false
     @State private var errorMessage: String?
+    @State private var coverImageData: Data?
+    @State private var coverPhotoItem: PhotosPickerItem?
+    @State private var showingCoverCamera = false
 
     var body: some View {
         NavigationStack {
             Form {
+                Section("Titelbild") {
+                    if let data = coverImageData, let uiImage = UIImage(data: data) {
+                        Image(uiImage: uiImage)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 160)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .listRowInsets(EdgeInsets())
+                    }
+                    HStack(spacing: 16) {
+                        if CameraCapturePicker.isAvailable {
+                            Button { showingCoverCamera = true } label: {
+                                Label("Kamera", systemImage: "camera")
+                                    .font(.footnote.bold())
+                                    .foregroundStyle(BaumioTheme.accent)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        PhotosPicker(selection: $coverPhotoItem, matching: .images) {
+                            Label("Foto wählen", systemImage: "photo")
+                                .font(.footnote.bold())
+                                .foregroundStyle(BaumioTheme.accent)
+                        }
+                        if coverImageData != nil {
+                            Button(role: .destructive) { coverImageData = nil } label: {
+                                Image(systemName: "trash").foregroundStyle(BaumioTheme.danger)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
                 Section("Projekt") {
                     TextField("Projektname", text: $name)
                         .accessibilityLabel("Projektname")
@@ -4589,6 +5303,15 @@ struct ProjectEditorView: View {
                     TextField("Beschreibung", text: $description, axis: .vertical)
                         .lineLimit(3...6)
                         .accessibilityLabel("Beschreibung")
+                }
+
+                Section("Finanzierung") {
+                    TextField("Eigenkapital (€)", text: $eigenkapital)
+                        .decimalOnly($eigenkapital)
+                        .accessibilityLabel("Eigenkapital")
+                    TextField("Baudarlehen / Kredit (€)", text: $kredit)
+                        .decimalOnly($kredit)
+                        .accessibilityLabel("Baudarlehen")
                 }
 
                 if let errorMessage {
@@ -4632,6 +5355,25 @@ struct ProjectEditorView: View {
         }
         .baumioBackground()
         .onAppear { prefill() }
+        .sheet(isPresented: $showingCoverCamera) {
+            CameraCapturePicker { data in
+                coverImageData = ImageCompression.compressedJPEG(from: data) ?? data
+            }
+        }
+        .onChange(of: coverPhotoItem) { _, newItem in
+            guard let newItem else { return }
+            Task {
+                if let data = try? await newItem.loadTransferable(type: Data.self) {
+                    coverImageData = ImageCompression.compressedJPEG(from: data) ?? data
+                }
+                coverPhotoItem = nil
+            }
+        }
+    }
+
+    private static func coverImageURL(for projectID: UUID) -> URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("project_cover_\(projectID.uuidString).jpg")
     }
 
     private func prefill() {
@@ -4642,6 +5384,9 @@ struct ProjectEditorView: View {
         status = project.status
         startDate = project.startDate
         endDate = project.plannedEndDate
+        eigenkapital = project.eigenkapital > 0 ? NSDecimalNumber(decimal: project.eigenkapital).stringValue : ""
+        kredit = project.kredit > 0 ? NSDecimalNumber(decimal: project.kredit).stringValue : ""
+        coverImageData = try? Data(contentsOf: Self.coverImageURL(for: project.id))
     }
 
     private func save() async {
@@ -4649,16 +5394,350 @@ struct ProjectEditorView: View {
         isSaving = true
         defer { isSaving = false }
         let parsedBudget = Decimal(string: budget.replacingOccurrences(of: ",", with: ".")) ?? 0
+        let parsedEigenkapital = Decimal(string: eigenkapital.replacingOccurrences(of: ",", with: ".")) ?? 0
+        let parsedKredit = Decimal(string: kredit.replacingOccurrences(of: ",", with: ".")) ?? 0
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             if let project = editing {
-                try await model.updateProject(project, name: trimmedName, budget: parsedBudget, status: status, description: description.trimmingCharacters(in: .whitespacesAndNewlines), startDate: startDate, endDate: endDate)
+                try await model.updateProject(project, name: trimmedName, budget: parsedBudget, status: status, description: description.trimmingCharacters(in: .whitespacesAndNewlines), startDate: startDate, endDate: endDate, eigenkapital: parsedEigenkapital, kredit: parsedKredit)
+                saveCoverImage(for: project.id)
             } else {
                 try await model.createProject(name: trimmedName, budget: parsedBudget, status: status, description: description.trimmingCharacters(in: .whitespacesAndNewlines))
+                if let created = model.projects.first(where: { $0.name == trimmedName }) {
+                    saveCoverImage(for: created.id)
+                }
             }
             dismiss()
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    private func saveCoverImage(for projectID: UUID) {
+        let url = Self.coverImageURL(for: projectID)
+        if let data = coverImageData {
+            try? data.write(to: url)
+        } else {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+}
+
+// MARK: – Team-Übersicht (Business)
+
+struct TeamOverviewView: View {
+    @Environment(\.dismiss) private var dismiss
+    @Bindable var model: BaumioAppViewModel
+
+    private var byProject: [(name: String, members: [ProjectMember])] {
+        let grouped = Dictionary(grouping: model.allTeamMembers) { $0.projectID }
+        return grouped.map { (key, members) in
+            let name = members.first?.projectName ?? model.projects.first(where: { $0.id == key })?.name ?? "Projekt"
+            return (name: name, members: members)
+        }.sorted { $0.name < $1.name }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if model.allTeamMembers.isEmpty {
+                    ContentUnavailableView("Noch keine Mitglieder", systemImage: "person.3", description: Text("Lade Mitglieder in deine Projekte ein und sie erscheinen hier."))
+                } else {
+                    ForEach(byProject, id: \.name) { group in
+                        Section(group.name) {
+                            ForEach(group.members) { member in
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(member.invitedEmail)
+                                            .font(.subheadline)
+                                            .foregroundStyle(.primary)
+                                        Text(member.role.displayName)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    StatusBadge(
+                                        title: member.status == .accepted ? "Aktiv" : "Ausstehend",
+                                        color: member.status == .accepted ? BaumioTheme.success : BaumioTheme.warning
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Team-Übersicht")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Fertig") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
+// MARK: – Projektmitglieder
+
+struct MembersView: View {
+    @Environment(\.dismiss) private var dismiss
+    @Bindable var model: BaumioAppViewModel
+    @State private var inviteEmail = ""
+    @State private var inviteRole: MemberRole = .viewer
+    @State private var isSaving = false
+    @State private var errorMessage: String?
+    @State private var shareMessage: String?
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if !model.pendingInvites.isEmpty {
+                    Section("Offene Einladungen für dich") {
+                        ForEach(model.pendingInvites) { invite in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(invite.projectName.isEmpty ? "Projekt-Einladung" : invite.projectName)
+                                    .font(.subheadline.bold())
+                                    .foregroundStyle(BaumioTheme.primaryText)
+                                Text(invite.role.displayName)
+                                    .font(.caption)
+                                    .foregroundStyle(BaumioTheme.secondaryText)
+                            }
+                            .swipeActions(edge: .leading) {
+                                Button("Annehmen") {
+                                    model.handle { try await model.acceptInvite(invite) }
+                                }
+                                .tint(BaumioTheme.success)
+                            }
+                        }
+                    }
+                }
+
+                Section {
+                    if model.isBusiness {
+                        Label("Unbegrenzte Mitglieder (Business)", systemImage: "building.2.fill")
+                            .font(.caption)
+                            .foregroundStyle(BaumioTheme.accent)
+                    } else if model.isPro {
+                        let used = model.projectMembers.count
+                        let max = model.maxMembersPerProject
+                        HStack {
+                            Text("\(used) von \(max) Mitglieder genutzt (Pro)")
+                                .font(.caption)
+                                .foregroundStyle(used >= max ? BaumioTheme.warning : BaumioTheme.secondaryText)
+                            Spacer()
+                            if used >= max {
+                                Text("Limit erreicht")
+                                    .font(.caption.bold())
+                                    .foregroundStyle(BaumioTheme.warning)
+                            }
+                        }
+                    }
+
+                    let atLimit = !model.isBusiness && model.isPro && model.projectMembers.count >= model.maxMembersPerProject
+
+                    if atLimit {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Pro-Limit erreicht")
+                                .font(.subheadline.bold())
+                                .foregroundStyle(BaumioTheme.primaryText)
+                            Text("Mit Business kannst du unbegrenzt Architekten, Bauleiter und Partner einladen.")
+                                .font(.caption)
+                                .foregroundStyle(BaumioTheme.secondaryText)
+                            Button("Auf Business upgraden") {
+                                model.selectedSection = .pricing
+                            }
+                            .font(.caption.bold())
+                            .foregroundStyle(BaumioTheme.accent)
+                        }
+                        .padding(.vertical, 4)
+                    } else {
+                        TextField("E-Mail-Adresse", text: $inviteEmail)
+                            .keyboardType(.emailAddress)
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.never)
+                        Picker("Rolle", selection: $inviteRole) {
+                            ForEach(MemberRole.allCases) { Text($0.displayName).tag($0) }
+                        }
+                        if let errorMessage {
+                            Text(errorMessage)
+                                .font(.caption)
+                                .foregroundStyle(BaumioTheme.danger)
+                        }
+                        Button(isSaving ? "Einladen …" : "Einladen") {
+                            Task { await invite() }
+                        }
+                        .disabled(inviteEmail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSaving)
+                    }
+                } header: {
+                    Text("Mitglieder einladen")
+                }
+
+                if !model.projectMembers.isEmpty {
+                    Section("Aktuell eingeladen") {
+                        ForEach(model.projectMembers) { member in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(member.invitedEmail)
+                                        .font(.subheadline)
+                                        .foregroundStyle(BaumioTheme.primaryText)
+                                    HStack(spacing: 6) {
+                                        Text(member.role.displayName)
+                                            .font(.caption)
+                                            .foregroundStyle(BaumioTheme.secondaryText)
+                                        Text("·")
+                                            .font(.caption)
+                                            .foregroundStyle(BaumioTheme.secondaryText)
+                                        Text(member.status == .accepted ? "Akzeptiert" : "Ausstehend")
+                                            .font(.caption)
+                                            .foregroundStyle(member.status == .accepted ? BaumioTheme.success : BaumioTheme.warning)
+                                    }
+                                }
+                                Spacer()
+                                Image(systemName: member.status == .accepted ? "checkmark.circle.fill" : "clock")
+                                    .foregroundStyle(member.status == .accepted ? BaumioTheme.success : BaumioTheme.warning)
+                            }
+                            .swipeActions(edge: .trailing) {
+                                Button("Entfernen", role: .destructive) {
+                                    model.handle { try await model.removeMember(member) }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Section {
+                    Text("Eingeladene Personen erhalten Zugriff auf alle Daten des aktuell gewählten Projekts. Pro-Abo erforderlich.")
+                        .font(.caption)
+                        .foregroundStyle(BaumioTheme.secondaryText)
+                }
+            }
+            .navigationTitle("Projektmitglieder")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Fertig") { dismiss() }
+                }
+            }
+            .onAppear {
+                model.handle { try await model.loadPendingInvites() }
+            }
+            .sheet(item: Binding(
+                get: { shareMessage.map { ShareableText(text: $0) } },
+                set: { if $0 == nil { shareMessage = nil } }
+            )) { item in
+                ShareLink(item: item.text) {
+                    Label("Einladung teilen", systemImage: "square.and.arrow.up")
+                }
+                .padding()
+                .presentationDetents([.height(120)])
+            }
+        }
+    }
+
+    private func invite() async {
+        errorMessage = nil
+        isSaving = true
+        defer { isSaving = false }
+        let emailToInvite = inviteEmail
+        let projectName = model.selectedProject?.name ?? "Baumio-Projekt"
+        do {
+            try await model.inviteMember(email: emailToInvite, role: inviteRole)
+            inviteEmail = ""
+            shareMessage = """
+                Du wurdest zu „\(projectName)" auf Baumio eingeladen!
+
+                So startest du:
+                1. Lade Baumio kostenlos im App Store: https://baumio.eu/download
+                2. Erstelle ein Konto mit genau dieser E-Mail: \(emailToInvite)
+                3. Öffne Einstellungen → Projektmitglieder → Einladung annehmen
+
+                Fertig – du siehst dann das Projekt direkt in deiner Projektliste.
+                """
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
+// MARK: – Finanzierungsübersicht
+
+struct FinanzierungsCard: View {
+    let project: Project
+    let foerderungSumme: Decimal
+    let geplanteSumme: Decimal
+
+    private var gesamtFinanzierung: Decimal { project.eigenkapital + project.kredit + foerderungSumme }
+    private var differenz: Decimal { gesamtFinanzierung - geplanteSumme }
+    private var hatLuecke: Bool { differenz < 0 }
+
+    var body: some View {
+        BaumioCard {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Image(systemName: "building.columns")
+                        .foregroundStyle(BaumioTheme.accent)
+                    Text("Finanzierungsübersicht")
+                        .font(.headline)
+                        .foregroundStyle(BaumioTheme.primaryText)
+                }
+
+                HStack(spacing: 8) {
+                    if project.eigenkapital > 0 {
+                        finanzTile("Eigenkapital", project.eigenkapital, color: BaumioTheme.success)
+                    }
+                    if project.kredit > 0 {
+                        finanzTile("Baudarlehen", project.kredit, color: BaumioTheme.info)
+                    }
+                    if foerderungSumme > 0 {
+                        finanzTile("Förderungen", foerderungSumme, color: BaumioTheme.accent)
+                    }
+                }
+
+                Divider()
+
+                VStack(spacing: 6) {
+                    finanzRow("Gesamtfinanzierung", gesamtFinanzierung, bold: true)
+                    finanzRow("Geplante Kosten", geplanteSumme)
+                    HStack {
+                        Text(hatLuecke ? "Finanzierungslücke" : "Puffer")
+                            .font(.subheadline)
+                            .foregroundStyle(hatLuecke ? BaumioTheme.danger : BaumioTheme.success)
+                        Spacer()
+                        Text((hatLuecke ? -differenz : differenz).euroString)
+                            .font(.subheadline.bold())
+                            .foregroundStyle(hatLuecke ? BaumioTheme.danger : BaumioTheme.success)
+                    }
+                }
+            }
+        }
+    }
+
+    private func finanzTile(_ label: String, _ amount: Decimal, color: Color) -> some View {
+        VStack(spacing: 3) {
+            Text(amount.euroString)
+                .font(.subheadline.bold())
+                .foregroundStyle(color)
+                .minimumScaleFactor(0.5)
+                .lineLimit(1)
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(BaumioTheme.secondaryText)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 8)
+        .background(BaumioTheme.elevatedSurface)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func finanzRow(_ label: String, _ amount: Decimal, bold: Bool = false) -> some View {
+        HStack {
+            Text(label)
+                .font(bold ? .subheadline.bold() : .subheadline)
+                .foregroundStyle(BaumioTheme.secondaryText)
+            Spacer()
+            Text(amount.euroString)
+                .font(bold ? .subheadline.bold() : .subheadline)
+                .foregroundStyle(BaumioTheme.primaryText)
         }
     }
 }

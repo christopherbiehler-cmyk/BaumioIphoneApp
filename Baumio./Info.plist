@@ -2,10 +2,22 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>SUPABASE_URL</key>
-	<string>https://DEIN-PROJEKT.supabase.co</string>
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.productivity</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Baumio benötigt Zugriff auf deine Fotos, um Baustellenfotos zu dokumentieren.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Baumio benötigt die Kamera, um Fotos direkt aufzunehmen.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Baumio speichert exportierte Dokumente in deiner Fotobibliothek.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>Baumio möchte deine Bautermine in den iOS-Kalender exportieren.</string>
 	<key>SUPABASE_ANON_KEY</key>
-	<string>DEIN_SUPABASE_ANON_KEY</string>
+	<string>eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InF1ZWdmcWZjaGxmd3ZodmxpeHRvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU4MDA0MzIsImV4cCI6MjA5MTM3NjQzMn0.le4qdfebrld6560yoJbGe2OuId6RhpBM9q2N197PThQ</string>
+	<key>SUPABASE_URL</key>
+	<string>https://quegfqfchlfwvhvlixto.supabase.co</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>remote-notification</string>

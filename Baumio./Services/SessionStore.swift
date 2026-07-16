@@ -17,7 +17,7 @@ enum SessionStore {
         SecItemDelete(base as CFDictionary)
         var attributes = base
         attributes[kSecValueData as String] = data
-        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         SecItemAdd(attributes as CFDictionary, nil)
     }
 

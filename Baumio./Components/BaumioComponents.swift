@@ -159,7 +159,7 @@ struct PricingCard: View {
                 if plan.isHighlighted {
                     PrimaryButton(title: plan.buttonTitle, systemImage: "crown.fill", action: action)
                 } else {
-                    SecondaryButton(title: plan.buttonTitle, systemImage: "person.fill.checkmark", action: action)
+                    SecondaryButton(title: plan.buttonTitle, systemImage: plan.buttonSystemImage, action: action)
                 }
             }
         }

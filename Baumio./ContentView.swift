@@ -4,6 +4,8 @@ struct ContentView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.scenePhase) private var scenePhase
     @State private var model = BaumioAppViewModel()
+    @AppStorage("hasSeenAppTour") private var hasSeenAppTour = false
+    @State private var showingTour = false
 
     var body: some View {
         Group {
@@ -13,8 +15,14 @@ struct ContentView: View {
                 AuthView(model: model)
             } else if horizontalSizeClass == .regular {
                 iPadRootView(model: model)
+                    .fullScreenCover(isPresented: $showingTour) {
+                        AppTourView(isPresented: $showingTour)
+                    }
             } else {
                 iPhoneRootView(model: model)
+                    .fullScreenCover(isPresented: $showingTour) {
+                        AppTourView(isPresented: $showingTour)
+                    }
             }
         }
         .tint(BaumioTheme.accent)
@@ -26,6 +34,11 @@ struct ContentView: View {
         }
         .task {
             await model.restoreSession()
+        }
+        .onChange(of: model.isAuthenticated) { _, isAuth in
+            if isAuth && !hasSeenAppTour {
+                showingTour = true
+            }
         }
         .onChange(of: scenePhase) { _, newPhase in
             // Bei Rückkehr in den Vordergrund Pro-Status neu laden,
@@ -82,29 +95,39 @@ private struct iPadRootView: View {
         NavigationSplitView {
             List {
                 Section {
-                    ForEach(BaumioSection.allCases) { section in
-                        Button {
-                            model.selectedSection = section
-                        } label: {
-                            HStack {
-                                Label(section.rawValue, systemImage: section.systemImage)
-                                    .foregroundStyle(section == model.selectedSection ? BaumioTheme.accent : BaumioTheme.primaryText)
-                                Spacer()
-                                if section.requiresPro && !model.isPro {
-                                    Image(systemName: "lock.fill")
-                                        .font(.caption)
-                                        .foregroundStyle(BaumioTheme.secondaryText)
-                                        .accessibilityLabel("Pro erforderlich")
-                                }
-                            }
-                            .frame(minHeight: 44)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityAddTraits(section == model.selectedSection ? .isSelected : [])
-                    }
+                    sidebarRow(.dashboard)
+                    sidebarRow(.projects)
                 } header: {
                     BrandHeader(compact: true)
                         .padding(.vertical, 12)
+                }
+
+                Section("Planung") {
+                    sidebarRow(.schedule)
+                    sidebarRow(.diary)
+                    sidebarRow(.tasks)
+                    sidebarRow(.materials)
+                    sidebarRow(.timeTracking)
+                    sidebarRow(.handover)
+                    sidebarRow(.documents)
+                }
+
+                Section("Kosten & Verträge") {
+                    sidebarRow(.costs)
+                    sidebarRow(.offers)
+                    sidebarRow(.funding)
+                    sidebarRow(.taxes)
+                }
+
+                Section("Firmen & Qualität") {
+                    sidebarRow(.trades)
+                    sidebarRow(.defects)
+                    sidebarRow(.reviews)
+                }
+
+                Section("App") {
+                    sidebarRow(.pricing)
+                    sidebarRow(.settings)
                 }
             }
             .navigationTitle("Baumio")
@@ -116,6 +139,28 @@ private struct iPadRootView: View {
             }
         }
         .baumioBackground()
+    }
+
+    @ViewBuilder
+    private func sidebarRow(_ section: BaumioSection) -> some View {
+        Button {
+            model.selectedSection = section
+        } label: {
+            HStack {
+                Label(section.rawValue, systemImage: section.systemImage)
+                    .foregroundStyle(section == model.selectedSection ? BaumioTheme.accent : BaumioTheme.primaryText)
+                Spacer()
+                if section.requiresPro && !model.isPro {
+                    Image(systemName: "lock.fill")
+                        .font(.caption)
+                        .foregroundStyle(BaumioTheme.secondaryText)
+                        .accessibilityLabel("Pro erforderlich")
+                }
+            }
+            .frame(minHeight: 44)
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(section == model.selectedSection ? .isSelected : [])
     }
 }
 

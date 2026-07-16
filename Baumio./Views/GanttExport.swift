@@ -961,6 +961,11 @@ struct ShareableURL: Identifiable {
     let url: URL
 }
 
+struct ShareableText: Identifiable {
+    let id = UUID()
+    let text: String
+}
+
 /// Kamera-Aufnahme via UIImagePickerController. Gibt ein komprimiertes JPEG als Data zurück.
 struct CameraCapturePicker: UIViewControllerRepresentable {
     let onCapture: (Data) -> Void

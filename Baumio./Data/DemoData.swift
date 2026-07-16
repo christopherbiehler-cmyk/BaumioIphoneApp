@@ -34,6 +34,7 @@ enum DemoData {
         ),
         PricingPlan(
             name: "Pro",
+            planType: "pro",
             price: "8,99 € / Monat",
             subtitle: "14 Tage kostenlos testen, danach monatlich kündbar über Apple-Abos.",
             features: [
@@ -43,10 +44,27 @@ enum DemoData {
                 PricingFeature(title: "Bauzeitenplan als PDF für Behörden & Architekten", isIncluded: true),
                 PricingFeature(title: "Angebots-Vergleich – günstigsten Handwerker finden", isIncluded: true),
                 PricingFeature(title: "Handwerker bewerten & Übergabeprotokoll", isIncluded: true),
+                PricingFeature(title: "2 Projektmitglieder einladen (Architekten, Partner)", isIncluded: true),
                 PricingFeature(title: "Unbegrenzte Projekte & Gewerke · 5 GB Speicher", isIncluded: true)
             ],
             buttonTitle: "14 Tage kostenlos testen",
             isHighlighted: true
+        ),
+        PricingPlan(
+            name: "Business",
+            planType: "business",
+            price: "24,99 € / Monat",
+            subtitle: "Für Vermieter & Gewerbetreibende mit Teams und mehreren Objekten.",
+            features: [
+                PricingFeature(title: "Alles aus Pro", isIncluded: true),
+                PricingFeature(title: "Unbegrenzte Projektmitglieder", isIncluded: true),
+                PricingFeature(title: "Team-Übersicht aller Projekte", isIncluded: true),
+                PricingFeature(title: "Architekten, Bauleiter & Partner einladen", isIncluded: true),
+                PricingFeature(title: "Prioritäts-Support", isIncluded: true)
+            ],
+            buttonTitle: "Kontakt aufnehmen",
+            buttonSystemImage: "envelope.fill",
+            isHighlighted: false
         )
     ]
 }
