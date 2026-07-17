@@ -1996,6 +1996,12 @@ enum ImageCompression {
     }
 }
 
+private struct MonthlyPaidEntry: Identifiable {
+    let id = UUID()
+    let month: Date
+    let amount: Double
+}
+
 struct CostsView: View {
     @Bindable var model: BaumioAppViewModel
     @State private var showingEditor = false
@@ -2055,6 +2061,48 @@ struct CostsView: View {
                 }
                 if let project = model.selectedProject, project.eigenkapital > 0 || project.kredit > 0 || !model.funding.isEmpty {
                     FinanzierungsCard(project: project, foerderungSumme: model.funding.reduce(0) { $0 + $1.maxAmount }, geplanteSumme: model.plannedCosts)
+                }
+                if !tradesWithBudget.isEmpty {
+                    BaumioCard {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Budget-Ampel").font(.headline).foregroundStyle(BaumioTheme.primaryText)
+                            ForEach(tradesWithBudget) { trade in
+                                let label = trade.tradeType.isEmpty ? trade.company : trade.tradeType
+                                let ratio = trade.budget > 0 ? NSDecimalNumber(decimal: trade.costs / trade.budget).doubleValue : 0
+                                VStack(spacing: 4) {
+                                    HStack(spacing: 8) {
+                                        Circle().fill(ampelColor(trade.costs, budget: trade.budget)).frame(width: 10, height: 10)
+                                        Text(label).font(.subheadline).foregroundStyle(BaumioTheme.primaryText)
+                                        Spacer()
+                                        Text(trade.costs.euroString).font(.subheadline.bold()).foregroundStyle(ampelColor(trade.costs, budget: trade.budget))
+                                        Text("/ \(trade.budget.euroString)").font(.caption).foregroundStyle(BaumioTheme.secondaryText)
+                                    }
+                                    ProgressView(value: min(ratio, 1)).tint(ampelColor(trade.costs, budget: trade.budget))
+                                }
+                            }
+                        }
+                    }
+                }
+                if !monthlyCosts.isEmpty {
+                    BaumioCard {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Ausgaben pro Monat").font(.headline).foregroundStyle(BaumioTheme.primaryText)
+                            Chart(monthlyCosts) { entry in
+                                BarMark(
+                                    x: .value("Monat", entry.month, unit: .month),
+                                    y: .value("Bezahlt", entry.amount)
+                                )
+                                .foregroundStyle(BaumioTheme.accent)
+                                .cornerRadius(4)
+                            }
+                            .frame(height: 160)
+                            .chartXAxis {
+                                AxisMarks(values: .stride(by: .month)) { _ in
+                                    AxisValueLabel(format: .dateTime.month(.abbreviated))
+                                }
+                            }
+                        }
+                    }
                 }
                 if !model.costs.isEmpty && filteredCosts.isEmpty {
                     ContentUnavailableView.search(text: searchText)
@@ -2180,6 +2228,31 @@ struct CostsView: View {
 
     private var availableBudget: Decimal {
         (model.selectedProject?.budget ?? 0) - model.plannedCosts
+    }
+
+    private var tradesWithBudget: [Trade] {
+        model.trades.filter { $0.budget > 0 }
+    }
+
+    private func ampelColor(_ costs: Decimal, budget: Decimal) -> Color {
+        guard budget > 0 else { return BaumioTheme.success }
+        let ratio = NSDecimalNumber(decimal: costs / budget).doubleValue
+        if ratio >= 1.0 { return BaumioTheme.danger }
+        if ratio >= 0.8 { return BaumioTheme.warning }
+        return BaumioTheme.success
+    }
+
+    private var monthlyCosts: [MonthlyPaidEntry] {
+        let calendar = Calendar.current
+        var grouped: [Date: Double] = [:]
+        for cost in model.costs {
+            guard let date = cost.paymentDate ?? cost.invoiceDate, cost.paid > 0 else { continue }
+            let comps = calendar.dateComponents([.year, .month], from: date)
+            guard let monthStart = calendar.date(from: comps) else { continue }
+            grouped[monthStart, default: 0] += NSDecimalNumber(decimal: cost.paid).doubleValue
+        }
+        return grouped.map { MonthlyPaidEntry(month: $0.key, amount: $0.value) }
+            .sorted { $0.month < $1.month }
     }
 }
 
@@ -3147,6 +3220,16 @@ struct DefectsView: View {
                             Text("Frist: \(defect.deadline.formatted(date: .abbreviated, time: .omitted))")
                                 .font(.footnote.bold())
                                 .foregroundStyle(BaumioTheme.secondaryText)
+                            Spacer()
+                            Button {
+                                let next = defect.status == "Behoben" ? "offen" : "behoben"
+                                model.handle { try await model.updateDefectStatus(defect, status: next) }
+                            } label: {
+                                Image(systemName: defect.status == "Behoben" ? "checkmark.circle.fill" : "checkmark.circle")
+                                    .foregroundStyle(defect.status == "Behoben" ? BaumioTheme.success : BaumioTheme.secondaryText)
+                                    .font(.title3)
+                            }
+                            .accessibilityLabel(defect.status == "Behoben" ? "Als offen markieren" : "Als behoben markieren")
                         }
                         PhotoSection(model: model, bucket: "defect-photos", photos: model.defectPhotos[defect.id] ?? []) { data in
                             model.handle { try await model.addDefectPhoto(defect, imageData: data) }
