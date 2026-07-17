@@ -14,6 +14,10 @@
 	<string>Baumio speichert exportierte Dokumente in deiner Fotobibliothek.</string>
 	<key>NSCalendarsUsageDescription</key>
 	<string>Baumio möchte deine Bautermine in den iOS-Kalender exportieren.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Baumio nutzt deinen Standort, um das aktuelle Wetter für den Bautagebuch-Eintrag abzurufen.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>Baumio liest Kontaktdaten, um Handwerkerfirmen direkt aus deinem Adressbuch zu importieren.</string>
 	<key>SUPABASE_ANON_KEY</key>
 	<string>eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InF1ZWdmcWZjaGxmd3ZodmxpeHRvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU4MDA0MzIsImV4cCI6MjA5MTM3NjQzMn0.le4qdfebrld6560yoJbGe2OuId6RhpBM9q2N197PThQ</string>
 	<key>SUPABASE_URL</key>

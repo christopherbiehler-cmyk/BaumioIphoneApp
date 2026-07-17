@@ -6,6 +6,164 @@ import UniformTypeIdentifiers
 import UIKit
 import StoreKit
 import EventKit
+import CoreLocation
+import Contacts
+import ContactsUI
+import Combine
+
+// MARK: – Wetter-Hilfsfunktionen (Open-Meteo, kein API-Key nötig)
+
+private final class LocationFetcher: NSObject, CLLocationManagerDelegate, @unchecked Sendable {
+    private let manager = CLLocationManager()
+    private var continuation: CheckedContinuation<CLLocation?, Never>?
+
+    override init() {
+        super.init()
+        manager.delegate = self
+        manager.desiredAccuracy = kCLLocationAccuracyKilometer
+    }
+
+    func fetchLocation() async -> CLLocation? {
+        manager.requestWhenInUseAuthorization()
+        return await withCheckedContinuation { cont in
+            self.continuation = cont
+            self.manager.requestLocation()
+        }
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        continuation?.resume(returning: locations.first)
+        continuation = nil
+    }
+
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        continuation?.resume(returning: nil)
+        continuation = nil
+    }
+}
+
+private func wmoCodeToGerman(_ code: Int) -> String {
+    switch code {
+    case 0:            return "sonnig"
+    case 1, 2:         return "leicht bewölkt"
+    case 3:            return "bewölkt"
+    case 45, 48:       return "nebelig"
+    case 51...65:      return "regnerisch"
+    case 80...82:      return "regnerisch"
+    case 71...77:      return "schnee"
+    case 85, 86:       return "schnee"
+    case 95, 96, 99:   return "sturm"
+    default:           return "bewölkt"
+    }
+}
+
+private func fetchCurrentWeather() async -> (weather: String, temp: String)? {
+    let fetcher = LocationFetcher()
+    guard let location = await fetcher.fetchLocation() else { return nil }
+    let lat = location.coordinate.latitude, lon = location.coordinate.longitude
+    guard let url = URL(string: "https://api.open-meteo.com/v1/forecast?latitude=\(lat)&longitude=\(lon)&current_weather=true"),
+          let (data, _) = try? await URLSession.shared.data(from: url),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let cw = json["current_weather"] as? [String: Any],
+          let code = cw["weathercode"] as? Int,
+          let temp = cw["temperature"] as? Double else { return nil }
+    return (wmoCodeToGerman(code), "\(Int(temp.rounded()))")
+}
+
+// MARK: – Kontakt-Import
+
+private struct ContactPickerView: UIViewControllerRepresentable {
+    let onSelect: (CNContact) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeUIViewController(context: Context) -> CNContactPickerViewController {
+        let vc = CNContactPickerViewController()
+        vc.delegate = context.coordinator
+        return vc
+    }
+
+    func updateUIViewController(_ uiViewController: CNContactPickerViewController, context: Context) {}
+
+    final class Coordinator: NSObject, CNContactPickerDelegate {
+        let parent: ContactPickerView
+        init(_ parent: ContactPickerView) { self.parent = parent }
+
+        func contactPicker(_ picker: CNContactPickerViewController, didSelect contact: CNContact) {
+            parent.onSelect(contact)
+        }
+
+        func contactPickerDidCancel(_ picker: CNContactPickerViewController) {}
+    }
+}
+
+struct ContactImportSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Bindable var model: BaumioAppViewModel
+    @State private var showingContactPicker = false
+    @State private var name = ""
+    @State private var company = ""
+    @State private var phone = ""
+    @State private var email = ""
+    @State private var address = ""
+    @State private var tradeType = ""
+    private let tradeTypes = ["", "Elektriker", "Sanitär", "Maler", "Zimmermann", "Dachdecker",
+                              "Fliesenleger", "Heizung", "Statiker", "Architekt", "Sonstiges"]
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Button {
+                        showingContactPicker = true
+                    } label: {
+                        Label("Kontakt aus Adressbuch wählen", systemImage: "person.crop.circle.badge.plus")
+                    }
+                    .foregroundStyle(BaumioTheme.accent)
+                }
+                Section("Firmendetails") {
+                    TextField("Ansprechpartner", text: $name)
+                    TextField("Firma / Unternehmen", text: $company)
+                    Picker("Gewerk", selection: $tradeType) {
+                        ForEach(tradeTypes, id: \.self) {
+                            Text($0.isEmpty ? "Kein Gewerk" : $0).tag($0)
+                        }
+                    }
+                }
+                if !phone.isEmpty || !email.isEmpty || !address.isEmpty {
+                    Section("Importierte Kontaktdaten") {
+                        if !phone.isEmpty { Label(phone, systemImage: "phone").foregroundStyle(BaumioTheme.secondaryText) }
+                        if !email.isEmpty { Label(email, systemImage: "envelope").foregroundStyle(BaumioTheme.secondaryText) }
+                        if !address.isEmpty { Label(address, systemImage: "mappin").foregroundStyle(BaumioTheme.secondaryText) }
+                    }
+                }
+            }
+            .navigationTitle("Kontakt importieren")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Abbrechen") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Speichern") {
+                        model.handle { try await model.createTrade(name: name, company: company, tradeType: tradeType, address: address, phone: phone, email: email, notes: "") }
+                        dismiss()
+                    }
+                    .disabled(name.isEmpty && company.isEmpty)
+                }
+            }
+        }
+        .sheet(isPresented: $showingContactPicker) {
+            ContactPickerView { contact in
+                name = [contact.givenName, contact.familyName].filter { !$0.isEmpty }.joined(separator: " ")
+                company = contact.organizationName
+                phone = contact.phoneNumbers.first?.value.stringValue ?? ""
+                email = contact.emailAddresses.first?.value as String? ?? ""
+                if let addr = contact.postalAddresses.first?.value {
+                    address = [addr.street, addr.postalCode, addr.city].filter { !$0.isEmpty }.joined(separator: " ")
+                }
+            }
+        }
+    }
+}
 
 // MARK: – App-Tour (nach erstem Login, einmalig)
 
@@ -685,6 +843,7 @@ struct TradesView: View {
     @Bindable var model: BaumioAppViewModel
     @State private var showingEditor = false
     @State private var showingBizCardScanner = false
+    @State private var showingContactImport = false
     @State private var editingItem: EditingItem?
     @State private var deletingTrade: Trade?
     @State private var searchText = ""
@@ -724,6 +883,21 @@ struct TradesView: View {
             } else {
                 HStack(spacing: 10) {
                     PrimaryButton(title: "Firma anlegen", systemImage: "plus", action: { showingEditor = true })
+                    Button { showingContactImport = true } label: {
+                        Label("Kontakte", systemImage: "person.crop.circle.badge.plus")
+                            .font(.headline)
+                            .frame(minWidth: 44, minHeight: 44)
+                            .padding(.horizontal, 12)
+                            .foregroundStyle(BaumioTheme.primaryText)
+                            .background(BaumioTheme.elevatedSurface)
+                            .clipShape(RoundedRectangle(cornerRadius: BaumioTheme.controlRadius, style: .continuous))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: BaumioTheme.controlRadius, style: .continuous)
+                                    .stroke(BaumioTheme.border, lineWidth: 1)
+                            }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Kontakt aus Adressbuch importieren")
                     if model.isPro {
                         Button { showingBizCardScanner = true } label: {
                             Label("Visitenkarte", systemImage: "camera.viewfinder")
@@ -867,6 +1041,9 @@ struct TradesView: View {
         }
         .sheet(isPresented: $showingBizCardScanner) {
             VisitenkarteScannerSheet(model: model)
+        }
+        .sheet(isPresented: $showingContactImport) {
+            ContactImportSheet(model: model)
         }
         .alert("Firma löschen?", isPresented: Binding(get: { deletingTrade != nil }, set: { if !$0 { deletingTrade = nil } })) {
             Button("Abbrechen", role: .cancel) { deletingTrade = nil }
@@ -1091,6 +1268,8 @@ struct DiaryView: View {
     @State private var showingEditor = false
     @State private var editingItem: EditingItem?
     @State private var deletingEntry: DiaryEntry?
+    @State private var autoWeather = ""
+    @State private var autoTemperature = ""
 
     var body: some View {
         ListScreen(title: "Bautagebuch", subtitle: "Tägliche Einträge, Wetter, Firmen, Fotos und Notizen") {
@@ -1124,10 +1303,16 @@ struct DiaryView: View {
             }
         }
         .sheet(isPresented: $showingEditor) {
-            QuickAddView(kind: .diary, model: model)
+            QuickAddView(kind: .diary, model: model, initialWeather: autoWeather, initialTemperature: autoTemperature)
         }
         .sheet(item: $editingItem) { item in
             QuickAddView(editing: item, model: model)
+        }
+        .task {
+            if let result = await fetchCurrentWeather() {
+                autoWeather = result.weather
+                autoTemperature = result.temp
+            }
         }
         .alert("Eintrag löschen?", isPresented: Binding(get: { deletingEntry != nil }, set: { if !$0 { deletingEntry = nil } })) {
             Button("Abbrechen", role: .cancel) { deletingEntry = nil }
@@ -1342,10 +1527,65 @@ struct TimeLogsView: View {
     @Bindable var model: BaumioAppViewModel
     @State private var showingEditor = false
     @State private var editingItem: EditingItem?
+    @AppStorage("baumioTimerStart") private var timerStartTimestamp: Double = 0
+    @State private var elapsedSeconds = 0
+    @State private var showingTimerSheet = false
+    @State private var timerElapsedMinutes = 0
+
+    private var isTimerRunning: Bool { timerStartTimestamp > 0 }
+
+    private var timerDisplayText: String {
+        let s = elapsedSeconds
+        let h = s / 3600, m = (s % 3600) / 60, sec = s % 60
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, sec) : String(format: "%02d:%02d", m, sec)
+    }
+
+    private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
         ScreenScaffold(title: "Zeiterfassung", subtitle: "Arbeitszeiten erfassen und auswerten") {
             PrimaryButton(title: "Zeit erfassen", systemImage: "plus", action: { showingEditor = true })
+
+            BaumioCard {
+                VStack(spacing: 12) {
+                    HStack {
+                        Image(systemName: "timer")
+                            .foregroundStyle(isTimerRunning ? BaumioTheme.danger : BaumioTheme.accent)
+                            .font(.title2)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Stoppuhr").font(.headline).foregroundStyle(BaumioTheme.primaryText)
+                            Text(isTimerRunning
+                                 ? "Läuft seit \(Date(timeIntervalSince1970: timerStartTimestamp).formatted(date: .omitted, time: .shortened))"
+                                 : "Starten → automatisch als Zeiteintrag erfassen")
+                                .font(.caption).foregroundStyle(BaumioTheme.secondaryText)
+                        }
+                        Spacer()
+                        if isTimerRunning {
+                            Text(timerDisplayText)
+                                .font(.title2.monospacedDigit().bold())
+                                .foregroundStyle(BaumioTheme.danger)
+                        }
+                    }
+                    Button {
+                        if isTimerRunning {
+                            let seconds = Int(Date().timeIntervalSince1970 - timerStartTimestamp)
+                            timerElapsedMinutes = max(1, seconds / 60)
+                            timerStartTimestamp = 0
+                            elapsedSeconds = 0
+                            showingTimerSheet = true
+                        } else {
+                            timerStartTimestamp = Date().timeIntervalSince1970
+                        }
+                    } label: {
+                        Label(isTimerRunning ? "Stopp & Zeiteintrag anlegen" : "Timer starten",
+                              systemImage: isTimerRunning ? "stop.circle.fill" : "play.circle.fill")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(isTimerRunning ? BaumioTheme.danger : BaumioTheme.success)
+                }
+            }
 
             BaumioCard {
                 HStack {
@@ -1398,8 +1638,20 @@ struct TimeLogsView: View {
         .sheet(isPresented: $showingEditor) {
             QuickAddView(kind: .timeLog, model: model)
         }
+        .sheet(isPresented: $showingTimerSheet) {
+            QuickAddView(kind: .timeLog, model: model, initialHours: timerElapsedMinutes / 60, initialMinutes: timerElapsedMinutes % 60)
+        }
         .sheet(item: $editingItem) { item in
             QuickAddView(editing: item, model: model)
+        }
+        .onReceive(ticker) { _ in
+            guard isTimerRunning else { return }
+            elapsedSeconds = Int(Date().timeIntervalSince1970 - timerStartTimestamp)
+        }
+        .onAppear {
+            if isTimerRunning {
+                elapsedSeconds = Int(Date().timeIntervalSince1970 - timerStartTimestamp)
+            }
         }
     }
 
@@ -4660,12 +4912,14 @@ struct QuickAddView: View {
     @State private var showingQuickAddCamera = false
     @State private var materialURL: String = ""
 
-    init(kind: QuickAddKind, model: BaumioAppViewModel) {
+    init(kind: QuickAddKind, model: BaumioAppViewModel,
+         initialWeather: String = "", initialTemperature: String = "",
+         initialHours: Int = 0, initialMinutes: Int = 0) {
         self.kind = kind
         self.editing = nil
         self._model = Bindable(wrappedValue: model)
         _title = State(initialValue: "")
-        _secondary = State(initialValue: "")
+        _secondary = State(initialValue: initialWeather)
         _amount = State(initialValue: "")
         _unit = State(initialValue: "")
         _notes = State(initialValue: "")
@@ -4675,13 +4929,13 @@ struct QuickAddView: View {
         _category = State(initialValue: "sonstiges")
         _severity = State(initialValue: "mäßig")
         _importance = State(initialValue: "wichtig")
-        _temperature = State(initialValue: "")
+        _temperature = State(initialValue: initialTemperature)
         _supplier = State(initialValue: "")
         _articleNumber = State(initialValue: "")
         _fundingItemID = State(initialValue: nil)
         _offerScope = State(initialValue: "")
-        _hours = State(initialValue: "")
-        _minutes = State(initialValue: "")
+        _hours = State(initialValue: initialHours > 0 ? "\(initialHours)" : "")
+        _minutes = State(initialValue: initialMinutes > 0 ? "\(initialMinutes)" : "")
         _timeCategory = State(initialValue: .planung)
         _dependsOnID = State(initialValue: nil)
         _budget = State(initialValue: "")
