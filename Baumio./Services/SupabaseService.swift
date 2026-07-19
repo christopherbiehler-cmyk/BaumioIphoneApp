@@ -52,6 +52,7 @@ struct ProjectDetails: Sendable {
     let handoverItems: [HandoverItem]
     let funding: [FundingItem]
     let reviews: [ReviewItem]
+    let floorPlans: [FloorPlan]
 }
 
 enum AppError: LocalizedError {
@@ -186,6 +187,10 @@ struct SupabaseProject: Codable, Identifiable, Sendable {
     let progressByCosts: Int?
     let eigenkapital: Decimal?
     let kredit: Decimal?
+    let floorPlanPath: String?
+    let handoverSignedAt: String?
+    let handoverSig1Path: String?
+    let handoverSig2Path: String?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -199,6 +204,10 @@ struct SupabaseProject: Codable, Identifiable, Sendable {
         case progressByCosts = "progress_by_costs"
         case eigenkapital
         case kredit
+        case floorPlanPath = "floor_plan_path"
+        case handoverSignedAt = "handover_signed_at"
+        case handoverSig1Path = "handover_sig1_path"
+        case handoverSig2Path = "handover_sig2_path"
     }
 
     var appProject: Project {
@@ -215,7 +224,11 @@ struct SupabaseProject: Codable, Identifiable, Sendable {
             progressByCosts: progressByCosts ?? 0,
             eigenkapital: eigenkapital ?? 0,
             kredit: kredit ?? 0,
-            ownerUserID: userID
+            ownerUserID: userID,
+            floorPlanPath: floorPlanPath,
+            handoverSignedAt: handoverSignedAt.flatMap { ISO8601DateFormatter().date(from: $0) },
+            handoverSig1Path: handoverSig1Path,
+            handoverSig2Path: handoverSig2Path
         )
     }
 
@@ -408,6 +421,7 @@ struct NewSupabaseDefect: Encodable, Sendable {
     let severity: String?
     let importance: String?
     let status: String
+    let floorPlanID: UUID?
 
     enum CodingKeys: String, CodingKey {
         case projectID = "project_id"
@@ -415,6 +429,7 @@ struct NewSupabaseDefect: Encodable, Sendable {
         case severity
         case importance
         case status
+        case floorPlanID = "floor_plan_id"
     }
 }
 
@@ -563,6 +578,28 @@ struct UpdateSupabaseDefect: Encodable, Sendable {
     let status: String
 }
 
+struct UpdateSupabaseDefectDescription: Encodable, Sendable {
+    let description: String
+}
+
+struct UpdateSupabaseProjectFloorPlan: Encodable, Sendable {
+    let floorPlanPath: String?
+    enum CodingKeys: String, CodingKey {
+        case floorPlanPath = "floor_plan_path"
+    }
+}
+
+struct UpdateSupabaseHandoverSignature: Encodable, Sendable {
+    let handoverSignedAt: String?
+    let handoverSig1Path: String?
+    let handoverSig2Path: String?
+    enum CodingKeys: String, CodingKey {
+        case handoverSignedAt = "handover_signed_at"
+        case handoverSig1Path = "handover_sig1_path"
+        case handoverSig2Path = "handover_sig2_path"
+    }
+}
+
 struct UpdateSupabaseDiary: Encodable, Sendable {
     let date: String
     let weather: String?
@@ -587,15 +624,16 @@ struct SupabaseTradeRow: Decodable, Sendable {
     let status: String?
     let notes: String?
     let budget: Decimal?
+    let progress: Int?
 
     enum CodingKeys: String, CodingKey {
-        case id, name, company, status, notes, budget
+        case id, name, company, status, notes, budget, progress
         case tradeType = "trade_type"
     }
 
     var appTrade: Trade {
         let (address, phone, email, cleanNotes) = TradeContactCoder.decode(notes)
-        return Trade(id: id, name: name, company: company ?? "", tradeType: tradeType ?? "", address: address, phone: phone, email: email, status: WorkStatus(tradeValue: status), costs: 0, budget: budget ?? 0, notes: cleanNotes, rating: 0)
+        return Trade(id: id, name: name, company: company ?? "", tradeType: tradeType ?? "", address: address, phone: phone, email: email, status: WorkStatus(tradeValue: status), costs: 0, budget: budget ?? 0, notes: cleanNotes, rating: 0, progress: progress ?? 0)
     }
 }
 
@@ -783,15 +821,55 @@ struct SupabaseQuoteRow: Decodable, Sendable {
     }
 }
 
+struct SupabaseFloorPlanRow: Decodable, Sendable {
+    let id: UUID
+    let projectID: UUID
+    let label: String
+    let storagePath: String
+    let sortOrder: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case projectID = "project_id"
+        case label
+        case storagePath = "storage_path"
+        case sortOrder = "sort_order"
+    }
+
+    var appFloorPlan: FloorPlan {
+        FloorPlan(id: id, projectID: projectID, label: label, storagePath: storagePath, sortOrder: sortOrder ?? 0)
+    }
+}
+
+struct NewSupabaseFloorPlan: Encodable, Sendable {
+    let projectID: UUID
+    let label: String
+    let storagePath: String
+    let sortOrder: Int
+
+    enum CodingKeys: String, CodingKey {
+        case projectID = "project_id"
+        case label
+        case storagePath = "storage_path"
+        case sortOrder = "sort_order"
+    }
+}
+
 struct SupabaseDefectRow: Decodable, Sendable {
     let id: UUID
     let description: String
     let status: String?
     let severity: String?
     let importance: String?
+    let floorPlanID: UUID?
+
+    enum CodingKeys: String, CodingKey {
+        case id, description, status, severity, importance
+        case floorPlanID = "floor_plan_id"
+    }
 
     var appDefect: DefectItem {
-        let (trade, responsible, deadline, cleanDescription) = DefectMetaCoder.decode(description)
+        let (trade, responsible, deadline, pinX, pinY, cleanDescription) = DefectMetaCoder.decode(description)
         let rawTitle = cleanDescription.split(separator: "\n", maxSplits: 1).first.map(String.init)?.trimmingCharacters(in: .whitespaces) ?? ""
         let defectTitle = rawTitle.isEmpty ? "Mangel" : (rawTitle.count > 60 ? String(rawTitle.prefix(60)) + "…" : rawTitle)
         return DefectItem(
@@ -804,7 +882,10 @@ struct SupabaseDefectRow: Decodable, Sendable {
             status: status?.displayStatus ?? "Offen",
             priority: Priority(defectSeverity: severity),
             severity: severity ?? "mäßig",
-            importance: importance ?? "wichtig"
+            importance: importance ?? "wichtig",
+            pinX: pinX,
+            pinY: pinY,
+            floorPlanID: floorPlanID
         )
     }
 }
@@ -846,6 +927,7 @@ struct SupabaseHandoverRow: Decodable, Sendable {
     let status: String?
     let isDone: Bool?
     let notes: String?
+    let signatureURL: String?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -855,6 +937,7 @@ struct SupabaseHandoverRow: Decodable, Sendable {
         case status
         case isDone = "is_done"
         case notes
+        case signatureURL = "signature_url"
     }
 
     var appHandoverItem: HandoverItem {
@@ -865,10 +948,10 @@ struct SupabaseHandoverRow: Decodable, Sendable {
             tradeType: tradeType ?? "",
             status: HandoverStatus(supabaseValue: status),
             isDone: isDone ?? false,
-            notes: notes ?? ""
+            notes: notes ?? "",
+            signatureURL: signatureURL
         )
-    }
-}
+    }}
 
 struct NewSupabaseHandover: Encodable, Sendable {
     let projectID: UUID
@@ -901,10 +984,52 @@ struct UpdateSupabaseHandoverItem: Encodable, Sendable {
     let room: String?
     let tradeType: String?
     let notes: String?
+    let signatureURL: String?
 
     enum CodingKeys: String, CodingKey {
         case item, room, notes
         case tradeType = "trade_type"
+        case signatureURL = "signature_url"
+    }
+}
+
+struct SupabaseDefectCommentRow: Decodable, Sendable {
+    let id: UUID
+    let defectID: UUID
+    let text: String
+    let author: String?
+    let createdAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case defectID = "defect_id"
+        case text
+        case author
+        case createdAt = "created_at"
+    }
+
+    private static let isoFormatter = ISO8601DateFormatter()
+
+    var appComment: DefectComment {
+        DefectComment(
+            id: id,
+            defectID: defectID,
+            text: text,
+            author: author ?? "",
+            createdAt: createdAt.flatMap(Self.isoFormatter.date(from:)) ?? Date()
+        )
+    }
+}
+
+struct NewSupabaseDefectComment: Encodable, Sendable {
+    let defectID: UUID
+    let text: String
+    let author: String?
+
+    enum CodingKeys: String, CodingKey {
+        case defectID = "defect_id"
+        case text
+        case author
     }
 }
 
@@ -1088,27 +1213,31 @@ enum FundingLinkCoder {
     }
 }
 
-// Kodiert/dekodiert Mangel-Metadaten (Gewerk, Verantwortlicher, Frist) im description-Feld.
-// Format: "#DEF:trade=Elektriker,resp=Müller,dead=2025-12-31\nBeschreibung"
+// Kodiert/dekodiert Mangel-Metadaten im description-Feld.
+// Format: "#DEF:trade=Elektriker,resp=Müller,dead=2025-12-31,px=0.45,py=0.62\nBeschreibung"
 enum DefectMetaCoder {
-    static func encode(trade: String, responsible: String, deadline: Date?, userNotes: String) -> String {
-        guard !trade.isEmpty || !responsible.isEmpty || deadline != nil else { return userNotes }
+    static func encode(trade: String, responsible: String, deadline: Date?, userNotes: String, pinX: Double? = nil, pinY: Double? = nil) -> String {
+        guard !trade.isEmpty || !responsible.isEmpty || deadline != nil || pinX != nil else { return userNotes }
         var parts: [String] = []
         if !trade.isEmpty { parts.append("trade=\(trade.replacingOccurrences(of: ",", with: ";"))") }
         if !responsible.isEmpty { parts.append("resp=\(responsible.replacingOccurrences(of: ",", with: ";"))") }
         if let deadline { parts.append("dead=\(BaumioDateFormatter.string(from: deadline))") }
+        if let px = pinX { parts.append("px=\(String(format: "%.4f", px))") }
+        if let py = pinY { parts.append("py=\(String(format: "%.4f", py))") }
         let header = "#DEF:" + parts.joined(separator: ",")
         return userNotes.isEmpty ? header : header + "\n" + userNotes
     }
 
-    static func decode(_ raw: String) -> (trade: String, responsible: String, deadline: Date?, description: String) {
+    static func decode(_ raw: String) -> (trade: String, responsible: String, deadline: Date?, pinX: Double?, pinY: Double?, description: String) {
         let parts = raw.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
         guard let first = parts.first, first.hasPrefix("#DEF:") else {
-            return ("", "", nil, raw)
+            return ("", "", nil, nil, nil, raw)
         }
         let description = parts.count > 1 ? parts[1] : ""
         var trade = "", responsible = ""
         var deadline: Date? = nil
+        var pinX: Double? = nil
+        var pinY: Double? = nil
         for pair in first.dropFirst(5).split(separator: ",") {
             let kv = pair.split(separator: "=", maxSplits: 1).map(String.init)
             guard kv.count == 2 else { continue }
@@ -1116,10 +1245,12 @@ enum DefectMetaCoder {
             case "trade": trade = kv[1].replacingOccurrences(of: ";", with: ",")
             case "resp":  responsible = kv[1].replacingOccurrences(of: ";", with: ",")
             case "dead":  deadline = BaumioDateFormatter.shared.date(from: kv[1])
+            case "px":    pinX = Double(kv[1])
+            case "py":    pinY = Double(kv[1])
             default: break
             }
         }
-        return (trade, responsible, deadline, description)
+        return (trade, responsible, deadline, pinX, pinY, description)
     }
 }
 
@@ -1548,12 +1679,24 @@ struct SupabaseService: Sendable {
     }
 
     func fetchProjects(accessToken: String) async throws -> [Project] {
-        let endpoint = try endpoint(path: "rest/v1/projects", query: [
-            URLQueryItem(name: "select", value: "id,user_id,name,status,budget,start_date,end_date,description,progress_by_costs,eigenkapital,kredit"),
-            URLQueryItem(name: "order", value: "created_at.desc")
-        ])
-        let rows: [SupabaseProject] = try await sendRest(endpoint: endpoint, method: "GET", accessToken: accessToken)
-        return rows.map(\.appProject)
+        let fullSelect = "id,user_id,name,status,budget,start_date,end_date,description,progress_by_costs,eigenkapital,kredit,floor_plan_path,handover_signed_at,handover_sig1_path,handover_sig2_path"
+        let baseSelect = "id,user_id,name,status,budget,start_date,end_date,description,progress_by_costs,eigenkapital,kredit"
+        do {
+            let ep = try endpoint(path: "rest/v1/projects", query: [
+                URLQueryItem(name: "select", value: fullSelect),
+                URLQueryItem(name: "order", value: "created_at.desc")
+            ])
+            let rows: [SupabaseProject] = try await sendRest(endpoint: ep, method: "GET", accessToken: accessToken)
+            return rows.map(\.appProject)
+        } catch {
+            // Fallback: SQL-Migration noch nicht ausgeführt → neue Spalten weglassen
+            let ep = try endpoint(path: "rest/v1/projects", query: [
+                URLQueryItem(name: "select", value: baseSelect),
+                URLQueryItem(name: "order", value: "created_at.desc")
+            ])
+            let rows: [SupabaseProject] = try await sendRest(endpoint: ep, method: "GET", accessToken: accessToken)
+            return rows.map(\.appProject)
+        }
     }
 
     func createProject(_ project: NewSupabaseProject, accessToken: String) async throws -> Project {
@@ -1564,17 +1707,18 @@ struct SupabaseService: Sendable {
     }
 
     func fetchProjectDetails(projectID: UUID, accessToken: String) async throws -> ProjectDetails {
-        async let trades: [SupabaseTradeRow] = fetchRows("trades", projectID: projectID, accessToken: accessToken, select: "id,name,company,trade_type,status,notes,budget")
+        async let trades: [SupabaseTradeRow] = fetchRows("trades", projectID: projectID, accessToken: accessToken, select: "id,name,company,trade_type,status,notes,budget,progress")
         async let appointments: [SupabaseAppointmentRow] = fetchRows("appointments", projectID: projectID, accessToken: accessToken, select: "id,title,date,status,notes")
         async let todos: [SupabaseTodoRow] = fetchRows("project_todos", projectID: projectID, accessToken: accessToken, select: "id,title,priority,due_date,done")
         async let materials: [SupabaseMaterialRow] = fetchRows("materials", projectID: projectID, accessToken: accessToken, select: "id,name,quantity,unit,supplier,article_number,price_estimated,price_actual,status,notes")
         async let costs: [SupabaseCostRow] = fetchRows("costs", projectID: projectID, accessToken: accessToken, select: "id,description,category,amount,planned_amount,status,invoice_number,notes,invoice_date,due_date,labor_amount,machine_amount,travel_amount,warranty_end,payment_date,supplier")
         async let quotes: [SupabaseQuoteRow] = fetchRows("quotes", projectID: projectID, accessToken: accessToken, select: "id,title,company,amount,valid_until,notes,is_selected,scope,quote_status")
-        async let defects: [SupabaseDefectRow] = fetchRows("defects", projectID: projectID, accessToken: accessToken, select: "id,description,status,severity,importance")
+        async let defects: [SupabaseDefectRow] = fetchRows("defects", projectID: projectID, accessToken: accessToken, select: "id,description,status,severity,importance,floor_plan_id")
+        async let floorPlans: [SupabaseFloorPlanRow] = fetchRows("floor_plans", projectID: projectID, accessToken: accessToken, select: "id,project_id,label,storage_path,sort_order")
         async let diary: [SupabaseDiaryRow] = fetchRows("diary_entries", projectID: projectID, accessToken: accessToken, select: "id,date,weather,notes,present_trades")
         async let documents: [SupabaseDocumentRow] = fetchRows("documents", projectID: projectID, accessToken: accessToken, select: "id,name,doc_type,storage_path,file_size,created_at")
         async let timeLogs: [SupabaseTimeLogRow] = fetchRows("time_logs", projectID: projectID, accessToken: accessToken, select: "id,title,category,log_date,duration_minutes,description")
-        async let handover: [SupabaseHandoverRow] = fetchRows("handover_items", projectID: projectID, accessToken: accessToken, select: "id,item,room,trade_type,status,is_done,notes")
+        async let handover: [SupabaseHandoverRow] = fetchRows("handover_items", projectID: projectID, accessToken: accessToken, select: "id,item,room,trade_type,status,is_done,notes,signature_url")
         async let subsidies: [SupabaseSubsidyRow] = fetchRows("subsidies", projectID: projectID, accessToken: accessToken, select: "id,name,provider,amount,status,deadline,reference_number,notes")
         async let ratings: [SupabaseTradeRatingRow] = fetchRows("trade_ratings", projectID: projectID, accessToken: accessToken, select: "id,trade_id,quality,punctuality,communication,price_performance,would_recommend,notes")
 
@@ -1584,6 +1728,7 @@ struct SupabaseService: Sendable {
         // statt den ganzen Login/Datenladevorgang scheitern zu lassen.
         let subsidyRows = (try? await subsidies) ?? []
         let ratingRows = (try? await ratings) ?? []
+        let floorPlanRows = (try? await floorPlans) ?? []
 
         return try await ProjectDetails(
             trades: tradeRows.map(\.appTrade),
@@ -1598,7 +1743,8 @@ struct SupabaseService: Sendable {
             timeLogs: timeLogs.map(\.appTimeLog),
             handoverItems: handover.map(\.appHandoverItem),
             funding: subsidyRows.map(\.appFunding),
-            reviews: ratingRows.map { $0.appReview(trade: tradeLookup[$0.tradeID ?? UUID()]) }
+            reviews: ratingRows.map { $0.appReview(trade: tradeLookup[$0.tradeID ?? UUID()]) },
+            floorPlans: floorPlanRows.map(\.appFloorPlan)
         )
     }
 
@@ -1684,6 +1830,17 @@ struct SupabaseService: Sendable {
         return try await sendRest(endpoint: endpoint, method: "GET", accessToken: accessToken)
     }
 
+    func fetchDefectComments(defectIDs: [UUID], accessToken: String) async throws -> [SupabaseDefectCommentRow] {
+        guard !defectIDs.isEmpty else { return [] }
+        let list = defectIDs.map(\.uuidString).joined(separator: ",")
+        let endpoint = try endpoint(path: "rest/v1/defect_comments", query: [
+            URLQueryItem(name: "select", value: "id,defect_id,text,author,created_at"),
+            URLQueryItem(name: "defect_id", value: "in.(\(list))"),
+            URLQueryItem(name: "order", value: "created_at.asc")
+        ])
+        return try await sendRest(endpoint: endpoint, method: "GET", accessToken: accessToken)
+    }
+
     /// Liest den aktuellen Speicherverbrauch des Nutzers (Bytes) aus der View.
     func fetchStorageUsage(userID: UUID, accessToken: String) async throws -> Int {
         let endpoint = try endpoint(path: "rest/v1/storage_usage_per_user", query: [
@@ -1760,9 +1917,16 @@ struct SupabaseService: Sendable {
             }
             throw SupabaseError.requestFailed(friendlyMessage)
         }
-        if ResponseBody.self == EmptySupabaseResponse.self, data.isEmpty { return EmptySupabaseResponse() as! ResponseBody }
+        // Safe: type equality verified before cast — EmptySupabaseResponse matches caller's ResponseBody
+        if ResponseBody.self == EmptySupabaseResponse.self, data.isEmpty {
+            guard let typed = EmptySupabaseResponse() as? ResponseBody else { throw SupabaseError.invalidResponse }
+            return typed
+        }
         do { return try JSONDecoder().decode(ResponseBody.self, from: data) } catch {
-            if ResponseBody.self == EmptySupabaseResponse.self { return EmptySupabaseResponse() as! ResponseBody }
+            if ResponseBody.self == EmptySupabaseResponse.self {
+                guard let typed = EmptySupabaseResponse() as? ResponseBody else { throw SupabaseError.invalidResponse }
+                return typed
+            }
             // Supabase returns HTTP 200 with a user object (no access_token) when email confirmation is required
             if httpResponse.statusCode == 200,
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

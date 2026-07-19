@@ -5,7 +5,9 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var model = BaumioAppViewModel()
     @AppStorage("hasSeenAppTour") private var hasSeenAppTour = false
+    @AppStorage("projectWizardShown") private var projectWizardShown = false
     @State private var showingTour = false
+    @State private var showingWizard = false
 
     var body: some View {
         Group {
@@ -15,13 +17,19 @@ struct ContentView: View {
                 AuthView(model: model)
             } else if horizontalSizeClass == .regular {
                 iPadRootView(model: model)
-                    .fullScreenCover(isPresented: $showingTour) {
+                    .fullScreenCover(isPresented: $showingTour, onDismiss: triggerWizardIfNeeded) {
                         AppTourView(isPresented: $showingTour)
+                    }
+                    .sheet(isPresented: $showingWizard) {
+                        ProjectSetupWizardView(model: model, isPresented: $showingWizard)
                     }
             } else {
                 iPhoneRootView(model: model)
-                    .fullScreenCover(isPresented: $showingTour) {
+                    .fullScreenCover(isPresented: $showingTour, onDismiss: triggerWizardIfNeeded) {
                         AppTourView(isPresented: $showingTour)
+                    }
+                    .sheet(isPresented: $showingWizard) {
+                        ProjectSetupWizardView(model: model, isPresented: $showingWizard)
                     }
             }
         }
@@ -36,8 +44,12 @@ struct ContentView: View {
             await model.restoreSession()
         }
         .onChange(of: model.isAuthenticated) { _, isAuth in
-            if isAuth && !hasSeenAppTour {
+            guard isAuth else { return }
+            if !hasSeenAppTour {
                 showingTour = true
+            } else if model.projects.isEmpty && !projectWizardShown {
+                projectWizardShown = true
+                showingWizard = true
             }
         }
         .onChange(of: scenePhase) { _, newPhase in
@@ -47,39 +59,35 @@ struct ContentView: View {
             Task { await model.refreshProStatus() }
         }
     }
+
+    private func triggerWizardIfNeeded() {
+        guard model.projects.isEmpty && !projectWizardShown else { return }
+        projectWizardShown = true
+        showingWizard = true
+    }
 }
 
 private struct iPhoneRootView: View {
     @Bindable var model: BaumioAppViewModel
+    @AppStorage("customTabSections") private var tabString = "Dashboard,Projekte,Termine,Dokumente"
+
+    private var pinnedSections: [BaumioSection] {
+        let parsed = tabString.split(separator: ",").compactMap { BaumioSection(rawValue: String($0)) }
+        return parsed.isEmpty ? [.dashboard, .projects, .schedule, .documents] : parsed
+    }
 
     var body: some View {
         TabView(selection: $model.selectedSection) {
-            NavigationStack {
-                DashboardView(model: model)
+            ForEach(pinnedSections) { section in
+                NavigationStack {
+                    sectionView(section, model: model)
+                }
+                .tabItem { Label(section.rawValue, systemImage: section.systemImage) }
+                .tag(section)
             }
-            .tabItem { Label("Dashboard", systemImage: BaumioSection.dashboard.systemImage) }
-            .tag(BaumioSection.dashboard)
 
             NavigationStack {
-                ProjectsView(model: model)
-            }
-            .tabItem { Label("Projekte", systemImage: BaumioSection.projects.systemImage) }
-            .tag(BaumioSection.projects)
-
-            NavigationStack {
-                ScheduleView(model: model)
-            }
-            .tabItem { Label("Termine", systemImage: BaumioSection.schedule.systemImage) }
-            .tag(BaumioSection.schedule)
-
-            NavigationStack {
-                DocumentsView(model: model)
-            }
-            .tabItem { Label("Dokumente", systemImage: BaumioSection.documents.systemImage) }
-            .tag(BaumioSection.documents)
-
-            NavigationStack {
-                MoreView(model: model)
+                MoreView(model: model, pinnedSections: pinnedSections)
             }
             .tabItem { Label("Mehr", systemImage: "ellipsis.circle") }
             .tag(BaumioSection.settings)
@@ -166,23 +174,17 @@ private struct iPadRootView: View {
 
 private struct MoreView: View {
     @Bindable var model: BaumioAppViewModel
+    var pinnedSections: [BaumioSection] = []
 
-    private let sections: [BaumioSection] = [
-        .trades,
-        .diary,
-        .tasks,
-        .materials,
-        .timeTracking,
-        .handover,
-        .costs,
-        .offers,
-        .defects,
-        .funding,
-        .taxes,
-        .reviews,
-        .pricing,
-        .settings
+    private static let allSectionsOrdered: [BaumioSection] = [
+        .dashboard, .projects, .trades, .schedule, .diary, .tasks,
+        .materials, .timeTracking, .handover, .documents, .costs,
+        .offers, .defects, .funding, .taxes, .reviews, .pricing, .settings
     ]
+
+    private var sections: [BaumioSection] {
+        Self.allSectionsOrdered.filter { !pinnedSections.contains($0) }
+    }
 
     var body: some View {
         List {

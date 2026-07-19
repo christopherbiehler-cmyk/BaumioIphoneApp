@@ -12,6 +12,7 @@ final class StoreManager {
     private(set) var products: [Product] = []
     private(set) var isSubscribed = false
     private(set) var isPurchasing = false
+    private(set) var isLoadingProducts = false
     var purchaseError: String?
 
     private var updatesTask: Task<Void, Never>?
@@ -34,6 +35,8 @@ final class StoreManager {
     }
 
     func loadProducts() async {
+        isLoadingProducts = true
+        defer { isLoadingProducts = false }
         do {
             products = try await Product.products(for: [Self.proProductID])
         } catch {

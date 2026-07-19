@@ -109,6 +109,11 @@ struct Project: Identifiable, Hashable {
     var kredit: Decimal = 0
     /// Supabase user_id des Projektbesitzers – nil bedeutet eigenes Projekt (Demo-Modus).
     var ownerUserID: UUID? = nil
+    var floorPlanPath: String? = nil
+    /// Zeitpunkt der finalen Protokoll-Unterschrift. Wenn gesetzt → Protokoll ist gesperrt.
+    var handoverSignedAt: Date? = nil
+    var handoverSig1Path: String? = nil
+    var handoverSig2Path: String? = nil
 }
 
 struct Trade: Identifiable, Hashable {
@@ -124,6 +129,7 @@ struct Trade: Identifiable, Hashable {
     var budget: Decimal = 0
     var notes: String
     var rating: Int
+    var progress: Int = 0
 }
 
 struct ScheduleItem: Identifiable, Hashable {
@@ -239,6 +245,14 @@ struct OfferItem: Identifiable, Hashable {
     var scope: String = ""
 }
 
+struct FloorPlan: Identifiable, Equatable, Sendable {
+    var id: UUID = UUID()
+    var projectID: UUID
+    var label: String
+    var storagePath: String
+    var sortOrder: Int = 0
+}
+
 struct DefectItem: Identifiable, Hashable {
     var id = UUID()
     var title: String
@@ -250,6 +264,9 @@ struct DefectItem: Identifiable, Hashable {
     var priority: Priority
     var severity: String = "mäßig"
     var importance: String = "wichtig"
+    var pinX: Double? = nil
+    var pinY: Double? = nil
+    var floorPlanID: UUID? = nil
 }
 
 enum TimeLogCategory: String, CaseIterable, Identifiable {
@@ -321,6 +338,15 @@ struct HandoverItem: Identifiable, Hashable {
     var status: HandoverStatus
     var isDone: Bool
     var notes: String
+    var signatureURL: String? = nil
+}
+
+struct DefectComment: Identifiable, Hashable {
+    var id = UUID()
+    var defectID: UUID
+    var text: String
+    var author: String
+    var createdAt: Date
 }
 
 struct TimeLogItem: Identifiable, Hashable {

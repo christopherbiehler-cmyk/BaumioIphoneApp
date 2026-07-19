@@ -45,6 +45,7 @@ final class BaumioAppViewModel {
     var reviews: [ReviewItem]
     var timeLogs: [TimeLogItem] = []
     var handoverItems: [HandoverItem] = []
+    var floorPlans: [FloorPlan] = []
     var projectMembers: [ProjectMember] = []
     var pendingInvites: [ProjectMember] = []
     var displayName = ""
@@ -54,6 +55,8 @@ final class BaumioAppViewModel {
     var diaryPhotos: [UUID: [PhotoRef]] = [:]
     var costPhotos: [UUID: [PhotoRef]] = [:]
     var taskPhotos: [UUID: [PhotoRef]] = [:]
+    /// Kommentare je Mangel (Schlüssel = Mangel-ID).
+    var defectComments: [UUID: [DefectComment]] = [:]
     let pricingPlans = DemoData.pricingPlans
 
     private let supabase = SupabaseService()
@@ -560,6 +563,15 @@ final class BaumioAppViewModel {
         trades.removeAll { $0.id == trade.id }
     }
 
+    func updateTradeProgress(_ trade: Trade, progress: Int) async throws {
+        let context = try supabaseContext()
+        struct Patch: Encodable { let progress: Int }
+        try await supabase.update(Patch(progress: progress), in: "trades", id: trade.id, accessToken: context.accessToken)
+        if let idx = trades.firstIndex(where: { $0.id == trade.id }) {
+            trades[idx].progress = progress
+        }
+    }
+
     func deleteAppointment(_ item: ScheduleItem) async throws {
         let context = try supabaseContext()
         try await supabase.delete(from: "appointments", id: item.id, accessToken: context.accessToken)
@@ -594,6 +606,53 @@ final class BaumioAppViewModel {
         let context = try supabaseContext()
         try await supabase.delete(from: "defects", id: defect.id, accessToken: context.accessToken)
         defects.removeAll { $0.id == defect.id }
+        defectComments.removeValue(forKey: defect.id)
+    }
+
+    func addDefectComment(_ defect: DefectItem, text: String) async throws {
+        let context = try supabaseContext()
+        let author = supabaseSession?.user?.email ?? ""
+        let rows: [SupabaseDefectCommentRow] = try await supabase.insertReturning(
+            NewSupabaseDefectComment(defectID: defect.id, text: text, author: author.isEmpty ? nil : author),
+            into: "defect_comments",
+            accessToken: context.accessToken
+        )
+        if let row = rows.first {
+            defectComments[defect.id, default: []].append(row.appComment)
+        }
+    }
+
+    func deleteDefectComment(_ comment: DefectComment) async throws {
+        let context = try supabaseContext()
+        try await supabase.delete(from: "defect_comments", id: comment.id, accessToken: context.accessToken)
+        defectComments[comment.defectID]?.removeAll { $0.id == comment.id }
+    }
+
+    func saveHandoverSignature(_ item: HandoverItem, imageData: Data) async throws {
+        let context = try supabaseContext()
+        guard let userID = supabaseSession?.user?.id else { throw SupabaseError.missingSession }
+        let path = "\(userID)/handover/\(item.id.uuidString).png"
+        try await supabase.uploadToStorage(bucket: "signatures", path: path, data: imageData, contentType: "image/png", accessToken: context.accessToken)
+        try await supabase.update(
+            UpdateSupabaseHandoverItem(item: item.item, room: item.room.isEmpty ? nil : item.room, tradeType: item.tradeType.isEmpty ? nil : item.tradeType, notes: item.notes.isEmpty ? nil : item.notes, signatureURL: path),
+            in: "handover_items", id: item.id, accessToken: context.accessToken
+        )
+        if let idx = handoverItems.firstIndex(where: { $0.id == item.id }) {
+            handoverItems[idx].signatureURL = path
+        }
+    }
+
+    func deleteHandoverSignature(_ item: HandoverItem) async throws {
+        guard let path = item.signatureURL else { return }
+        let context = try supabaseContext()
+        try? await supabase.deleteFromStorage(bucket: "signatures", path: path, accessToken: context.accessToken)
+        try await supabase.update(
+            UpdateSupabaseHandoverItem(item: item.item, room: item.room.isEmpty ? nil : item.room, tradeType: item.tradeType.isEmpty ? nil : item.tradeType, notes: item.notes.isEmpty ? nil : item.notes, signatureURL: nil),
+            in: "handover_items", id: item.id, accessToken: context.accessToken
+        )
+        if let idx = handoverItems.firstIndex(where: { $0.id == item.id }) {
+            handoverItems[idx].signatureURL = nil
+        }
     }
 
     func deleteDiaryEntry(_ entry: DiaryEntry) async throws {
@@ -606,6 +665,122 @@ final class BaumioAppViewModel {
         let context = try supabaseContext()
         try await supabase.delete(from: "trade_ratings", id: review.id, accessToken: context.accessToken)
         reviews.removeAll { $0.id == review.id }
+    }
+
+    func uploadFloorPlan(imageData: Data) async throws {
+        let context = try supabaseContext()
+        guard let project = selectedProject else { throw SupabaseError.missingProject }
+        guard let userID = supabaseSession?.user?.id else { throw SupabaseError.missingSession }
+        let path = "\(userID)/floorplans/\(project.id.uuidString).jpg"
+        try await supabase.uploadToStorage(bucket: "floor-plans", path: path, data: imageData, contentType: "image/jpeg", accessToken: context.accessToken)
+        try await supabase.update(UpdateSupabaseProjectFloorPlan(floorPlanPath: path), in: "projects", id: project.id, accessToken: context.accessToken)
+        if let idx = projects.firstIndex(where: { $0.id == project.id }) {
+            projects[idx].floorPlanPath = path
+            selectedProject = projects[idx]
+        }
+    }
+
+    func removeFloorPlan() async throws {
+        let context = try supabaseContext()
+        guard let project = selectedProject, let path = project.floorPlanPath else { return }
+        try? await supabase.deleteFromStorage(bucket: "floor-plans", path: path, accessToken: context.accessToken)
+        try await supabase.update(UpdateSupabaseProjectFloorPlan(floorPlanPath: nil), in: "projects", id: project.id, accessToken: context.accessToken)
+        if let idx = projects.firstIndex(where: { $0.id == project.id }) {
+            projects[idx].floorPlanPath = nil
+            selectedProject = projects[idx]
+        }
+    }
+
+    func addFloorPlan(imageData: Data, label: String) async throws {
+        let context = try supabaseContext()
+        guard let project = selectedProject else { throw SupabaseError.missingProject }
+        guard let userID = supabaseSession?.user?.id else { throw SupabaseError.missingSession }
+        guard imageData.count <= Self.maxPhotoBytes else {
+            throw SupabaseError.requestFailed("Der Grundriss ist zu groß (\(imageData.count / 1_048_576) MB). Maximal 10 MB.")
+        }
+        guard canUpload(imageData.count) else {
+            throw SupabaseError.requestFailed("Speicherlimit erreicht. Upgrade auf Baumio Pro für 5 GB.")
+        }
+        let sortOrder = floorPlans.count
+        let path = "\(userID)/floorplans/\(project.id.uuidString)-\(UUID().uuidString).jpg"
+        try await supabase.uploadToStorage(bucket: "floor-plans", path: path, data: imageData, contentType: "image/jpeg", accessToken: context.accessToken)
+        let rows: [SupabaseFloorPlanRow] = try await supabase.insertReturning(
+            NewSupabaseFloorPlan(projectID: project.id, label: label, storagePath: path, sortOrder: sortOrder),
+            into: "floor_plans", accessToken: context.accessToken
+        )
+        if let created = rows.first?.appFloorPlan { floorPlans.append(created) }
+    }
+
+    func deleteFloorPlan(_ fp: FloorPlan) async throws {
+        let context = try supabaseContext()
+        try? await supabase.deleteFromStorage(bucket: "floor-plans", path: fp.storagePath, accessToken: context.accessToken)
+        try await supabase.delete(from: "floor_plans", id: fp.id, accessToken: context.accessToken)
+        floorPlans.removeAll { $0.id == fp.id }
+        defects.indices.forEach { if defects[$0].floorPlanID == fp.id { defects[$0].floorPlanID = nil } }
+    }
+
+    func renameFloorPlan(_ fp: FloorPlan, label: String) async throws {
+        struct UpdateLabel: Encodable, Sendable { let label: String }
+        let context = try supabaseContext()
+        try await supabase.update(UpdateLabel(label: label), in: "floor_plans", id: fp.id, accessToken: context.accessToken)
+        if let i = floorPlans.firstIndex(where: { $0.id == fp.id }) { floorPlans[i].label = label }
+    }
+
+    func updateDefectPin(_ defect: DefectItem, x: Double, y: Double) async throws {
+        let context = try supabaseContext()
+        let encoded = DefectMetaCoder.encode(trade: defect.trade, responsible: defect.responsible, deadline: defect.deadline, userNotes: defect.description, pinX: x, pinY: y)
+        try await supabase.update(UpdateSupabaseDefectDescription(description: encoded), in: "defects", id: defect.id, accessToken: context.accessToken)
+        if let i = defects.firstIndex(where: { $0.id == defect.id }) {
+            defects[i].pinX = x
+            defects[i].pinY = y
+        }
+    }
+
+    func finalizeHandover(sig1Data: Data, sig2Data: Data) async throws {
+        let context = try supabaseContext()
+        guard let project = selectedProject else { throw SupabaseError.missingProject }
+        guard let userID = supabaseSession?.user?.id else { throw SupabaseError.missingSession }
+        let sig1Path = "\(userID)/handover-protocol/\(project.id.uuidString)-bauherr.png"
+        let sig2Path = "\(userID)/handover-protocol/\(project.id.uuidString)-handwerker.png"
+        try await supabase.uploadToStorage(bucket: "signatures", path: sig1Path, data: sig1Data, contentType: "image/png", accessToken: context.accessToken)
+        try await supabase.uploadToStorage(bucket: "signatures", path: sig2Path, data: sig2Data, contentType: "image/png", accessToken: context.accessToken)
+        let signedAt = ISO8601DateFormatter().string(from: Date())
+        try await supabase.update(
+            UpdateSupabaseHandoverSignature(handoverSignedAt: signedAt, handoverSig1Path: sig1Path, handoverSig2Path: sig2Path),
+            in: "projects", id: project.id, accessToken: context.accessToken
+        )
+        let now = Date()
+        if let idx = projects.firstIndex(where: { $0.id == project.id }) {
+            projects[idx].handoverSignedAt = now
+            projects[idx].handoverSig1Path = sig1Path
+            projects[idx].handoverSig2Path = sig2Path
+            selectedProject = projects[idx]
+        }
+    }
+
+    func resetHandoverSignature() async throws {
+        let context = try supabaseContext()
+        guard let project = selectedProject else { throw SupabaseError.missingProject }
+        try await supabase.update(
+            UpdateSupabaseHandoverSignature(handoverSignedAt: nil, handoverSig1Path: nil, handoverSig2Path: nil),
+            in: "projects", id: project.id, accessToken: context.accessToken
+        )
+        if let idx = projects.firstIndex(where: { $0.id == project.id }) {
+            projects[idx].handoverSignedAt = nil
+            projects[idx].handoverSig1Path = nil
+            projects[idx].handoverSig2Path = nil
+            selectedProject = projects[idx]
+        }
+    }
+
+    func clearDefectPin(_ defect: DefectItem) async throws {
+        let context = try supabaseContext()
+        let encoded = DefectMetaCoder.encode(trade: defect.trade, responsible: defect.responsible, deadline: defect.deadline, userNotes: defect.description, pinX: nil, pinY: nil)
+        try await supabase.update(UpdateSupabaseDefectDescription(description: encoded), in: "defects", id: defect.id, accessToken: context.accessToken)
+        if let i = defects.firstIndex(where: { $0.id == defect.id }) {
+            defects[i].pinX = nil
+            defects[i].pinY = nil
+        }
     }
 
     private func loadDetails(for project: Project) async throws {
@@ -625,6 +800,7 @@ final class BaumioAppViewModel {
         handoverItems = details.handoverItems
         funding = details.funding
         reviews = details.reviews
+        floorPlans = details.floorPlans.sorted { $0.sortOrder < $1.sortOrder }
         await refreshStorageUsage()
         await loadPhotos(accessToken: accessToken)
     }
@@ -634,10 +810,21 @@ final class BaumioAppViewModel {
         async let fetchDiary = groupedPhotos(table: "diary_photos", parentColumn: "diary_entry_id", ids: diary.map(\.id), accessToken: accessToken)
         async let fetchCost = groupedPhotos(table: "cost_photos", parentColumn: "cost_id", ids: costs.map(\.id), accessToken: accessToken)
         async let fetchTask = groupedPhotos(table: "task_photos", parentColumn: "task_id", ids: tasks.map(\.id), accessToken: accessToken)
+        async let fetchComments = groupedComments(defectIDs: defects.map(\.id), accessToken: accessToken)
         defectPhotos = (try? await fetchDefect) ?? [:]
         diaryPhotos = (try? await fetchDiary) ?? [:]
         costPhotos = (try? await fetchCost) ?? [:]
         taskPhotos = (try? await fetchTask) ?? [:]
+        defectComments = (try? await fetchComments) ?? [:]
+    }
+
+    private func groupedComments(defectIDs: [UUID], accessToken: String) async throws -> [UUID: [DefectComment]] {
+        let rows = try await supabase.fetchDefectComments(defectIDs: defectIDs, accessToken: accessToken)
+        var result: [UUID: [DefectComment]] = [:]
+        for row in rows {
+            result[row.defectID, default: []].append(row.appComment)
+        }
+        return result
     }
 
     private func groupedPhotos(table: String, parentColumn: String, ids: [UUID], accessToken: String) async throws -> [UUID: [PhotoRef]] {
@@ -855,13 +1042,23 @@ final class BaumioAppViewModel {
     }
 
     @discardableResult
-    func createDefect(description: String, trade: String = "", responsible: String = "", deadline: Date = Date(), severity: String, importance: String, status: String) async throws -> DefectItem {
+    func createDefect(description: String, trade: String = "", responsible: String = "", deadline: Date = Date(), severity: String, importance: String, status: String, floorPlanID: UUID? = nil) async throws -> DefectItem {
         let context = try supabaseContext()
         let encoded = DefectMetaCoder.encode(trade: trade, responsible: responsible, deadline: deadline, userNotes: description)
-        let rows: [SupabaseDefectRow] = try await supabase.insertReturning(NewSupabaseDefect(projectID: context.projectID, description: encoded, severity: severity, importance: importance, status: status), into: "defects", accessToken: context.accessToken)
+        let rows: [SupabaseDefectRow] = try await supabase.insertReturning(NewSupabaseDefect(projectID: context.projectID, description: encoded, severity: severity, importance: importance, status: status, floorPlanID: floorPlanID), into: "defects", accessToken: context.accessToken)
         guard let created = rows.first?.appDefect else { throw SupabaseError.requestFailed("Mangel konnte nicht angelegt werden") }
         defects.append(created)
         return created
+    }
+
+    func setDefectFloorPlan(_ defect: DefectItem, floorPlanID: UUID?) async throws {
+        struct UpdateFloorPlanID: Encodable, Sendable {
+            let floorPlanID: UUID?
+            enum CodingKeys: String, CodingKey { case floorPlanID = "floor_plan_id" }
+        }
+        let context = try supabaseContext()
+        try await supabase.update(UpdateFloorPlanID(floorPlanID: floorPlanID), in: "defects", id: defect.id, accessToken: context.accessToken)
+        if let i = defects.firstIndex(where: { $0.id == defect.id }) { defects[i].floorPlanID = floorPlanID }
     }
 
     // MARK: - Dokumente / Speicher
@@ -891,9 +1088,14 @@ final class BaumioAppViewModel {
         }
     }
 
+    private static let maxDocumentBytes = 100 * 1_048_576  // 100 MB
+
     func uploadDocument(name: String, docType: String, data: Data, contentType: String, fileExtension: String) async throws {
         guard let session = supabaseSession, let userID = session.user?.id else { throw SupabaseError.missingSession }
         guard let projectID = selectedProject?.id else { throw SupabaseError.missingProject }
+        guard data.count <= Self.maxDocumentBytes else {
+            throw SupabaseError.requestFailed("Das Dokument ist zu groß (\(data.count / 1_048_576) MB). Maximal 100 MB pro Datei.")
+        }
         guard canUpload(data.count) else {
             throw SupabaseError.requestFailed("Speicherlimit erreicht (\(storageLimitBytes / 1_048_576) MB). Upgrade auf Baumio Pro für 5 GB.")
         }
@@ -1051,7 +1253,7 @@ final class BaumioAppViewModel {
 
     func updateHandoverItem(_ handoverItem: HandoverItem, itemText: String, room: String, tradeType: String, notes: String) async throws {
         let context = try supabaseContext()
-        try await supabase.update(UpdateSupabaseHandoverItem(item: itemText, room: room.nilIfEmpty, tradeType: tradeType.nilIfEmpty, notes: notes.nilIfEmpty), in: "handover_items", id: handoverItem.id, accessToken: context.accessToken)
+        try await supabase.update(UpdateSupabaseHandoverItem(item: itemText, room: room.nilIfEmpty, tradeType: tradeType.nilIfEmpty, notes: notes.nilIfEmpty, signatureURL: handoverItem.signatureURL), in: "handover_items", id: handoverItem.id, accessToken: context.accessToken)
         if let i = handoverItems.firstIndex(where: { $0.id == handoverItem.id }) {
             handoverItems[i].item = itemText
             handoverItems[i].room = room
@@ -1508,6 +1710,7 @@ final class BaumioAppViewModel {
         diaryPhotos = [:]
         costPhotos = [:]
         taskPhotos = [:]
+        defectComments = [:]
     }
 
     // MARK: - Profil
