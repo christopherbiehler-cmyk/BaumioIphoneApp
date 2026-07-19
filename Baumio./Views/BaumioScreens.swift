@@ -1142,6 +1142,7 @@ struct TradesView: View {
     }
 
     private func saveFavorite(_ trade: Trade) {
+        guard !trade.company.isEmpty || !trade.name.isEmpty else { return }
         var current = favoriteFirms
         let fav = FavoriteFirm(from: trade)
         guard !current.contains(where: { $0.company == fav.company && $0.name == fav.name }) else { return }
@@ -1467,6 +1468,10 @@ struct FavoriteFirmsSheet: View {
                         }
                         .swipeActions(edge: .leading) {
                             Button {
+                                guard model.canCreateTrade else {
+                                    importError = "Free-Plan: maximal 5 Firmen. Upgrade auf Baumio Pro für unbegrenzte Firmen."
+                                    return
+                                }
                                 isImporting = true
                                 Task {
                                     do {
@@ -2330,7 +2335,7 @@ struct HandoverView: View {
     }
 
     private func abnahmeFor(trade: String) -> AbnahmeRecord? {
-        model.abnahmen.first { $0.trade == trade }
+        model.abnahmen.first { $0.trade.lowercased() == trade.lowercased() }
     }
 
     private func progressFor(items: [HandoverItem]) -> Int {
@@ -4500,7 +4505,7 @@ struct DefectsView: View {
                   let image = UIImage(data: data) else { continue }
 
             let pins = pinned.map { entry in
-                (number: entry.number, x: entry.defect.pinX!, y: entry.defect.pinY!, title: entry.defect.title)
+                (number: entry.number, x: entry.defect.pinX!, y: entry.defect.pinY!, title: entry.defect.title, trade: entry.defect.trade, status: entry.defect.status)
             }
             floorPlanDataList.append(FloorPlanPinData(label: floorPlan.label, image: image, pins: pins))
         }

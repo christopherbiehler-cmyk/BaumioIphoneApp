@@ -268,7 +268,7 @@ struct PDFSignatureSection: View {
 struct FloorPlanPinData {
     let label: String
     let image: UIImage
-    let pins: [(number: Int, x: Double, y: Double, title: String)]
+    let pins: [(number: Int, x: Double, y: Double, title: String, trade: String, status: String)]
 }
 
 private struct FloorPlanPinOverlay: View {
@@ -333,8 +333,8 @@ private struct FloorPlanPinOverlay: View {
                     HStack(spacing: 0) {
                         legendCell("\(pin.number)", width: 32, bold: true)
                         legendCell(pin.title, width: 380)
-                        legendCell("", width: 150)
-                        legendCell("", width: 160)
+                        legendCell(pin.trade.isEmpty ? "–" : pin.trade, width: 150)
+                        legendCell(pin.status.isEmpty ? "–" : pin.status, width: 160)
                     }
                     .background(isEven ? Color(hex: "F5F7FA") : Color.white)
                 }
