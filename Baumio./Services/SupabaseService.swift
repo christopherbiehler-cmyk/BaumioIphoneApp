@@ -53,6 +53,7 @@ struct ProjectDetails: Sendable {
     let funding: [FundingItem]
     let reviews: [ReviewItem]
     let floorPlans: [FloorPlan]
+    let abnahmen: [AbnahmeRecord]
 }
 
 enum AppError: LocalizedError {
@@ -993,6 +994,67 @@ struct UpdateSupabaseHandoverItem: Encodable, Sendable {
     }
 }
 
+// MARK: - Abnahmen
+
+struct SupabaseAbnahmeRow: Decodable, Sendable {
+    let id: UUID
+    let projectID: UUID
+    let userID: UUID
+    let trade: String
+    let signedAt: String?
+    let sig1Path: String?
+    let sig2Path: String?
+    let notes: String?
+    let createdAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, trade, notes
+        case projectID = "project_id"
+        case userID = "user_id"
+        case signedAt = "signed_at"
+        case sig1Path = "sig1_path"
+        case sig2Path = "sig2_path"
+        case createdAt = "created_at"
+    }
+
+    var appAbnahme: AbnahmeRecord {
+        AbnahmeRecord(
+            id: id,
+            projectID: projectID,
+            trade: trade,
+            signedAt: signedAt.flatMap { ISO8601DateFormatter().date(from: $0) },
+            sig1Path: sig1Path,
+            sig2Path: sig2Path,
+            notes: notes ?? "",
+            createdAt: createdAt.flatMap { ISO8601DateFormatter().date(from: $0) } ?? Date()
+        )
+    }
+}
+
+struct NewSupabaseAbnahme: Encodable, Sendable {
+    let projectID: UUID
+    let userID: UUID
+    let trade: String
+
+    enum CodingKeys: String, CodingKey {
+        case projectID = "project_id"
+        case userID = "user_id"
+        case trade
+    }
+}
+
+struct UpdateSupabaseAbnahme: Encodable, Sendable {
+    let signedAt: String?
+    let sig1Path: String?
+    let sig2Path: String?
+
+    enum CodingKeys: String, CodingKey {
+        case signedAt = "signed_at"
+        case sig1Path = "sig1_path"
+        case sig2Path = "sig2_path"
+    }
+}
+
 struct SupabaseDefectCommentRow: Decodable, Sendable {
     let id: UUID
     let defectID: UUID
@@ -1721,6 +1783,7 @@ struct SupabaseService: Sendable {
         async let handover: [SupabaseHandoverRow] = fetchRows("handover_items", projectID: projectID, accessToken: accessToken, select: "id,item,room,trade_type,status,is_done,notes,signature_url")
         async let subsidies: [SupabaseSubsidyRow] = fetchRows("subsidies", projectID: projectID, accessToken: accessToken, select: "id,name,provider,amount,status,deadline,reference_number,notes")
         async let ratings: [SupabaseTradeRatingRow] = fetchRows("trade_ratings", projectID: projectID, accessToken: accessToken, select: "id,trade_id,quality,punctuality,communication,price_performance,would_recommend,notes")
+        async let abnahmenRows: [SupabaseAbnahmeRow] = fetchRows("abnahmen", projectID: projectID, accessToken: accessToken, select: "id,project_id,user_id,trade,signed_at,sig1_path,sig2_path,notes,created_at")
 
         let tradeRows = try await trades
         let tradeLookup = Dictionary(tradeRows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
@@ -1729,6 +1792,7 @@ struct SupabaseService: Sendable {
         let subsidyRows = (try? await subsidies) ?? []
         let ratingRows = (try? await ratings) ?? []
         let floorPlanRows = (try? await floorPlans) ?? []
+        let abnahmenData = (try? await abnahmenRows) ?? []
 
         return try await ProjectDetails(
             trades: tradeRows.map(\.appTrade),
@@ -1744,7 +1808,8 @@ struct SupabaseService: Sendable {
             handoverItems: handover.map(\.appHandoverItem),
             funding: subsidyRows.map(\.appFunding),
             reviews: ratingRows.map { $0.appReview(trade: tradeLookup[$0.tradeID ?? UUID()]) },
-            floorPlans: floorPlanRows.map(\.appFloorPlan)
+            floorPlans: floorPlanRows.map(\.appFloorPlan),
+            abnahmen: abnahmenData.map(\.appAbnahme)
         )
     }
 

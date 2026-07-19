@@ -263,6 +263,102 @@ struct PDFSignatureSection: View {
     }
 }
 
+// MARK: - Grundriss mit nummerierten Markierungen (für PDF)
+
+struct FloorPlanPinData {
+    let label: String
+    let image: UIImage
+    let pins: [(number: Int, x: Double, y: Double, title: String)]
+}
+
+private struct FloorPlanPinOverlay: View {
+    let data: FloorPlanPinData
+    private let contentWidth: CGFloat = 722
+
+    private var displayHeight: CGFloat {
+        guard data.image.size.width > 0 else { return 400 }
+        return contentWidth * data.image.size.height / data.image.size.width
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // Header
+            Text(data.label.uppercased())
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(Color(hex: "888888"))
+
+            // Grundriss + Pins
+            ZStack(alignment: .topLeading) {
+                Image(uiImage: data.image)
+                    .resizable()
+                    .frame(width: contentWidth, height: displayHeight)
+
+                ForEach(data.pins, id: \.number) { pin in
+                    ZStack {
+                        Circle()
+                            .fill(Color(hex: "E53935"))
+                            .frame(width: 22, height: 22)
+                        Circle()
+                            .stroke(Color.white, lineWidth: 1.5)
+                            .frame(width: 22, height: 22)
+                        Text("\(pin.number)")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+                    .offset(
+                        x: CGFloat(pin.x) * contentWidth - 11,
+                        y: CGFloat(pin.y) * displayHeight - 11
+                    )
+                }
+            }
+            .frame(width: contentWidth, height: displayHeight)
+            .clipped()
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(Color(hex: "DDDDDD"), lineWidth: 1)
+            )
+
+            // Legende
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 0) {
+                    legendCell("Nr.", width: 32, isHeader: true)
+                    legendCell("Mangel", width: 380, isHeader: true)
+                    legendCell("Gewerk", width: 150, isHeader: true)
+                    legendCell("Status", width: 160, isHeader: true)
+                }
+                .background(Color(hex: "1C3557"))
+
+                ForEach(data.pins, id: \.number) { pin in
+                    let isEven = pin.number % 2 == 0
+                    HStack(spacing: 0) {
+                        legendCell("\(pin.number)", width: 32, bold: true)
+                        legendCell(pin.title, width: 380)
+                        legendCell("", width: 150)
+                        legendCell("", width: 160)
+                    }
+                    .background(isEven ? Color(hex: "F5F7FA") : Color.white)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(Color(hex: "DDDDDD"), lineWidth: 1)
+            )
+        }
+    }
+
+    private func legendCell(_ text: String, width: CGFloat, isHeader: Bool = false, bold: Bool = false) -> some View {
+        Text(text)
+            .font(.system(size: isHeader ? 9 : 9, weight: isHeader || bold ? .bold : .regular))
+            .foregroundStyle(isHeader ? Color.white : Color(hex: "333333"))
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .frame(width: width, alignment: .leading)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+    }
+}
+
 // MARK: - Mängelprotokoll PDF
 
 /// Professionelles Mängelprotokoll – zum Teilen mit Handwerkern und Auftraggebern.
@@ -271,6 +367,7 @@ struct DefectsPDFPage: View {
     let projectName: String
     let exportDate: Date
     var project: Project? = nil
+    var floorPlanData: [FloorPlanPinData] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -288,6 +385,18 @@ struct DefectsPDFPage: View {
                 }
             } else {
                 Text("Keine Mängel erfasst.").font(.system(size: 12)).padding(.top, 12)
+            }
+
+            // Grundrisse mit Markierungen
+            if !floorPlanData.isEmpty {
+                Text("GRUNDRISSE MIT MARKIERUNGEN")
+                    .font(.system(size: 10, weight: .bold)).foregroundStyle(Color(hex: "888888"))
+                    .padding(.top, 20).padding(.bottom, 6)
+
+                ForEach(floorPlanData.indices, id: \.self) { i in
+                    FloorPlanPinOverlay(data: floorPlanData[i])
+                        .padding(.bottom, 20)
+                }
             }
 
             noteField(title: "ABSCHLIESSENDE BEMERKUNGEN").padding(.top, 12)

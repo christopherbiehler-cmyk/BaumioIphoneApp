@@ -1130,9 +1130,30 @@ struct TradesView: View {
     @State private var showingEditor = false
     @State private var showingBizCardScanner = false
     @State private var showingContactImport = false
+    @State private var showingFavorites = false
     @State private var editingItem: EditingItem?
     @State private var deletingTrade: Trade?
     @State private var searchText = ""
+
+    @AppStorage("favoriteFirmsData") private var favoriteFirmsData: Data = Data()
+
+    private var favoriteFirms: [FavoriteFirm] {
+        (try? JSONDecoder().decode([FavoriteFirm].self, from: favoriteFirmsData)) ?? []
+    }
+
+    private func saveFavorite(_ trade: Trade) {
+        var current = favoriteFirms
+        let fav = FavoriteFirm(from: trade)
+        guard !current.contains(where: { $0.company == fav.company && $0.name == fav.name }) else { return }
+        current.append(fav)
+        favoriteFirmsData = (try? JSONEncoder().encode(current)) ?? Data()
+    }
+
+    private func removeFavorite(_ fav: FavoriteFirm) {
+        var current = favoriteFirms
+        current.removeAll { $0.id == fav.id }
+        favoriteFirmsData = (try? JSONEncoder().encode(current)) ?? Data()
+    }
 
     private var filteredTrades: [Trade] {
         guard !searchText.isEmpty else { return model.trades }
@@ -1184,6 +1205,23 @@ struct TradesView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Kontakt aus Adressbuch importieren")
+                    if !favoriteFirms.isEmpty {
+                        Button { showingFavorites = true } label: {
+                            Label("Favoriten", systemImage: "star.fill")
+                                .font(.headline)
+                                .frame(minWidth: 44, minHeight: 44)
+                                .padding(.horizontal, 12)
+                                .foregroundStyle(BaumioTheme.accent)
+                                .background(BaumioTheme.elevatedSurface)
+                                .clipShape(RoundedRectangle(cornerRadius: BaumioTheme.controlRadius, style: .continuous))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: BaumioTheme.controlRadius, style: .continuous)
+                                        .stroke(BaumioTheme.border, lineWidth: 1)
+                                }
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Aus Favoriten importieren")
+                    }
                     if model.isPro {
                         Button { showingBizCardScanner = true } label: {
                             Label("Visitenkarte", systemImage: "camera.viewfinder")
@@ -1246,6 +1284,16 @@ struct TradesView: View {
                             Spacer()
                             Menu {
                                 Button("Bearbeiten") { editingItem = .trade(trade) }
+                                let isFav = favoriteFirms.contains { $0.company == trade.company && $0.name == trade.name }
+                                if isFav {
+                                    Button("Aus Favoriten entfernen") {
+                                        if let fav = favoriteFirms.first(where: { $0.company == trade.company && $0.name == trade.name }) {
+                                            removeFavorite(fav)
+                                        }
+                                    }
+                                } else {
+                                    Button("Als Favorit speichern") { saveFavorite(trade) }
+                                }
                                 Button("Löschen", role: .destructive) {
                                     deletingTrade = trade
                                 }
@@ -1349,6 +1397,9 @@ struct TradesView: View {
         .sheet(isPresented: $showingContactImport) {
             ContactImportSheet(model: model)
         }
+        .sheet(isPresented: $showingFavorites) {
+            FavoriteFirmsSheet(model: model, favoriteFirmsData: $favoriteFirmsData)
+        }
         .alert("Firma löschen?", isPresented: Binding(get: { deletingTrade != nil }, set: { if !$0 { deletingTrade = nil } })) {
             Button("Abbrechen", role: .cancel) { deletingTrade = nil }
             Button("Löschen", role: .destructive) {
@@ -1356,6 +1407,108 @@ struct TradesView: View {
             }
         } message: {
             Text("\(deletingTrade.map { $0.company.isEmpty ? $0.name : $0.company } ?? "diese Firma") wird unwiderruflich gelöscht.")
+        }
+    }
+}
+
+// MARK: - Favoriten-Firmen Sheet
+
+struct FavoriteFirmsSheet: View {
+    @Bindable var model: BaumioAppViewModel
+    @Binding var favoriteFirmsData: Data
+    @Environment(\.dismiss) private var dismiss
+    @State private var isImporting = false
+    @State private var importError: String?
+
+    private var favoriteFirms: [FavoriteFirm] {
+        (try? JSONDecoder().decode([FavoriteFirm].self, from: favoriteFirmsData)) ?? []
+    }
+
+    private func removeFavorite(_ fav: FavoriteFirm) {
+        var current = favoriteFirms
+        current.removeAll { $0.id == fav.id }
+        favoriteFirmsData = (try? JSONEncoder().encode(current)) ?? Data()
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if favoriteFirms.isEmpty {
+                    ContentUnavailableView(
+                        "Keine Favoriten",
+                        systemImage: "star",
+                        description: Text("Speichere Firmen aus einem Projekt als Favorit, um sie in anderen Projekten wiederzuverwenden.")
+                    )
+                } else {
+                    ForEach(favoriteFirms) { fav in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(fav.company.isEmpty ? fav.name : fav.company)
+                                .font(.headline)
+                                .foregroundStyle(BaumioTheme.primaryText)
+                            if !fav.tradeType.isEmpty {
+                                Text(fav.tradeType)
+                                    .font(.caption)
+                                    .foregroundStyle(BaumioTheme.secondaryText)
+                            }
+                            if !fav.phone.isEmpty {
+                                Label(fav.phone, systemImage: "phone")
+                                    .font(.caption)
+                                    .foregroundStyle(BaumioTheme.secondaryText)
+                            }
+                            if !fav.email.isEmpty {
+                                Label(fav.email, systemImage: "envelope")
+                                    .font(.caption)
+                                    .foregroundStyle(BaumioTheme.secondaryText)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                        .swipeActions(edge: .trailing) {
+                            Button("Löschen", role: .destructive) { removeFavorite(fav) }
+                        }
+                        .swipeActions(edge: .leading) {
+                            Button {
+                                isImporting = true
+                                Task {
+                                    do {
+                                        try await model.createTrade(
+                                            name: fav.name,
+                                            company: fav.company,
+                                            tradeType: fav.tradeType,
+                                            address: fav.address,
+                                            phone: fav.phone,
+                                            email: fav.email,
+                                            budget: 0,
+                                            notes: ""
+                                        )
+                                        dismiss()
+                                    } catch {
+                                        importError = error.localizedDescription
+                                    }
+                                    isImporting = false
+                                }
+                            } label: {
+                                Label("Hinzufügen", systemImage: "plus.circle.fill")
+                            }
+                            .tint(BaumioTheme.success)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Favoriten")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Fertig") { dismiss() }
+                }
+            }
+            .alert("Fehler", isPresented: Binding(get: { importError != nil }, set: { if !$0 { importError = nil } })) {
+                Button("OK") { importError = nil }
+            } message: {
+                Text(importError ?? "")
+            }
+            .overlay {
+                if isImporting { ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity).background(.ultraThinMaterial) }
+            }
         }
     }
 }
@@ -2052,6 +2205,7 @@ private let handoverTemplates: [(name: String, items: [(item: String, room: Stri
 ]
 
 struct HandoverProtocolSignatureView: View {
+    let trade: String
     @Bindable var model: BaumioAppViewModel
     @Binding var isPresented: Bool
     @State private var step = 0
@@ -2148,7 +2302,7 @@ struct HandoverProtocolSignatureView: View {
             renderer2.drawing = canvas2
             let sig2 = renderer2.drawing.image(from: renderer2.drawing.bounds.isEmpty ? CGRect(x: 0, y: 0, width: 300, height: 200) : renderer2.drawing.bounds, scale: 2).pngData() ?? Data()
             do {
-                try await model.finalizeHandover(sig1Data: sig1, sig2Data: sig2)
+                try await model.finalizeAbnahme(trade: trade, sig1Data: sig1, sig2Data: sig2)
                 isPresented = false
             } catch {
                 model.actionError = error.localizedDescription
@@ -2166,40 +2320,28 @@ struct HandoverView: View {
     @State private var exportSheet: ShareableURL?
     @State private var jsonExportSheet: ShareableURL?
     @State private var signingItem: HandoverItem?
+    @State private var signingTrade = ""
     @State private var showingProtocolSignature = false
 
-    private var isLocked: Bool { model.selectedProject?.handoverSignedAt != nil }
+    private var groupedByTrade: [(trade: String, items: [HandoverItem])] {
+        let groups = Dictionary(grouping: model.handoverItems) { $0.tradeType.isEmpty ? "Allgemein" : $0.tradeType }
+        return groups.map { (trade: $0.key, items: $0.value.sorted { $0.item < $1.item }) }
+            .sorted { $0.trade < $1.trade }
+    }
+
+    private func abnahmeFor(trade: String) -> AbnahmeRecord? {
+        model.abnahmen.first { $0.trade == trade }
+    }
+
+    private func progressFor(items: [HandoverItem]) -> Int {
+        guard !items.isEmpty else { return 0 }
+        return Int(Double(items.filter { $0.isDone }.count) / Double(items.count) * 100)
+    }
 
     var body: some View {
-        ScreenScaffold(title: "Übergabe & Abnahme", subtitle: "Prüfpunkte abhaken und Status festhalten") {
-            if isLocked {
-                if let date = model.selectedProject?.handoverSignedAt {
-                    BaumioCard {
-                        HStack(spacing: 12) {
-                            Image(systemName: "checkmark.seal.fill")
-                                .font(.title2)
-                                .foregroundStyle(BaumioTheme.success)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Abnahme rechtsgültig unterzeichnet")
-                                    .font(.subheadline.bold())
-                                    .foregroundStyle(BaumioTheme.primaryText)
-                                Text("Datum: \(date.formatted(date: .long, time: .shortened))")
-                                    .font(.caption)
-                                    .foregroundStyle(BaumioTheme.secondaryText)
-                                Text("Das Protokoll ist gesperrt und kann nicht mehr geändert werden.")
-                                    .font(.caption)
-                                    .foregroundStyle(BaumioTheme.secondaryText)
-                            }
-                        }
-                    }
-                    SecondaryButton(title: "Unterschrift zurücksetzen", systemImage: "arrow.uturn.backward") {
-                        model.handle { try await model.resetHandoverSignature() }
-                    }
-                }
-            } else {
-                PrimaryButton(title: "Prüfpunkt anlegen", systemImage: "plus", action: { showingEditor = true })
-                SecondaryButton(title: "Vorlage laden / importieren", systemImage: "list.bullet.clipboard") { showingTemplates = true }
-            }
+        ScreenScaffold(title: "Übergabe & Abnahme", subtitle: "Prüfpunkte je Gewerk abhaken und einzeln unterzeichnen") {
+            PrimaryButton(title: "Prüfpunkt anlegen", systemImage: "plus", action: { showingEditor = true })
+            SecondaryButton(title: "Vorlage laden / importieren", systemImage: "list.bullet.clipboard") { showingTemplates = true }
 
             if model.isPro {
                 SecondaryButton(title: "Protokoll als PDF exportieren", systemImage: "square.and.arrow.up") {
@@ -2227,92 +2369,138 @@ struct HandoverView: View {
                         }
                     }
                 }
-            }
-
-            BaumioCard {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Label("Abnahme-Fortschritt", systemImage: "checkmark.seal")
-                            .font(.headline)
-                            .foregroundStyle(BaumioTheme.primaryText)
-                        Spacer()
-                        Text("\(model.handoverProgress) %")
-                            .font(.title3.bold())
-                            .foregroundStyle(BaumioTheme.primaryText)
-                    }
-                    ProgressView(value: Double(model.handoverProgress) / 100)
-                        .tint(BaumioTheme.success)
-                }
+                .buttonStyle(.plain)
             }
 
             if model.handoverItems.isEmpty {
                 EmptyStateView(
                     title: "Noch keine Prüfpunkte",
-                    message: "Lege Prüfpunkte für die Bauabnahme an – z. B. Fenster dicht, Heizung funktioniert.",
+                    message: "Lege Prüfpunkte für die Bauabnahme an. Jedes Gewerk wird separat abgenommen.",
                     systemImage: "checkmark.seal"
                 )
             } else {
-                ForEach(model.handoverItems) { entry in
+                ForEach(groupedByTrade, id: \.trade) { group in
+                    let abnahme = abnahmeFor(trade: group.trade)
+                    let isLocked = abnahme?.isSigned == true
+                    let progress = progressFor(items: group.items)
+
                     BaumioCard {
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack(alignment: .top) {
-                                ItemLine(icon: entry.isDone ? "checkmark.circle.fill" : "circle", title: entry.item, subtitle: handoverSubtitle(entry), tint: entry.isDone ? BaumioTheme.success : BaumioTheme.secondaryText)
+                        VStack(alignment: .leading, spacing: 10) {
+                            // Gewerk-Kopfzeile
+                            HStack {
+                                Label(group.trade, systemImage: isLocked ? "checkmark.seal.fill" : "hammer")
+                                    .font(.headline)
+                                    .foregroundStyle(isLocked ? BaumioTheme.success : BaumioTheme.primaryText)
                                 Spacer()
-                                StatusBadge(title: entry.status.rawValue, color: handoverColor(entry.status))
-                                if !isLocked {
-                                    Menu {
-                                        Button("Bearbeiten") { editingItem = .handover(entry) }
-                                        Divider()
-                                        ForEach(HandoverStatus.allCases) { status in
-                                            Button(status.rawValue) {
-                                                model.handle { try await model.updateHandoverStatus(entry, status: status) }
-                                            }
-                                        }
-                                        Divider()
-                                        Button("Löschen", role: .destructive) {
-                                            model.handle { try await model.deleteHandoverItem(entry) }
-                                        }
-                                    } label: {
-                                        Image(systemName: "ellipsis.circle").foregroundStyle(BaumioTheme.secondaryText).font(.title3).frame(width: 44, height: 44)
-                                    }
-                                    .accessibilityLabel("Prüfpunkt bearbeiten, Status ändern oder löschen")
-                                }
+                                Text("\(progress) %")
+                                    .font(.caption.bold())
+                                    .foregroundStyle(progress == 100 ? BaumioTheme.success : BaumioTheme.secondaryText)
                             }
-                            if !entry.notes.isEmpty {
-                                Text(entry.notes).font(.footnote).foregroundStyle(BaumioTheme.secondaryText)
-                            }
-                            if !isLocked {
-                                HStack {
-                                    if entry.signatureURL != nil {
-                                        Label("Unterschrift vorhanden", systemImage: "signature")
-                                            .font(.caption)
+                            ProgressView(value: Double(progress) / 100)
+                                .tint(progress == 100 ? BaumioTheme.success : BaumioTheme.accent)
+
+                            // Abnahme-Banner wenn unterzeichnet
+                            if let abnahme, let date = abnahme.signedAt {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "checkmark.seal.fill").foregroundStyle(BaumioTheme.success)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text("Abgenommen")
+                                            .font(.caption.bold())
                                             .foregroundStyle(BaumioTheme.success)
+                                        Text(date.formatted(date: .long, time: .shortened))
+                                            .font(.caption2)
+                                            .foregroundStyle(BaumioTheme.secondaryText)
                                     }
                                     Spacer()
-                                    Button {
-                                        signingItem = entry
+                                    Button(role: .destructive) {
+                                        model.handle { try await model.deleteAbnahme(abnahme) }
                                     } label: {
-                                        Label(entry.signatureURL == nil ? "Unterschrift" : "Neu unterschreiben", systemImage: "signature")
-                                            .font(.caption.bold())
-                                            .foregroundStyle(BaumioTheme.accent)
-                                    }
-                                    if entry.signatureURL != nil {
-                                        Button(role: .destructive) {
-                                            model.handle { try await model.deleteHandoverSignature(entry) }
-                                        } label: {
-                                            Image(systemName: "xmark.circle").font(.caption).foregroundStyle(BaumioTheme.danger)
-                                        }
-                                        .accessibilityLabel("Unterschrift löschen")
+                                        Label("Zurücksetzen", systemImage: "arrow.uturn.backward")
+                                            .font(.caption)
+                                            .foregroundStyle(BaumioTheme.secondaryText)
                                     }
                                 }
+                                .padding(8)
+                                .background(BaumioTheme.success.opacity(0.1))
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                            }
+
+                            Divider()
+
+                            // Prüfpunkte
+                            ForEach(group.items) { entry in
+                                HStack(alignment: .top, spacing: 10) {
+                                    Button {
+                                        guard !isLocked else { return }
+                                        let newStatus: HandoverStatus = entry.isDone ? .offen : .akzeptiert
+                                        model.handle { try await model.updateHandoverStatus(entry, status: newStatus) }
+                                    } label: {
+                                        Image(systemName: entry.isDone ? "checkmark.circle.fill" : "circle")
+                                            .foregroundStyle(entry.isDone ? BaumioTheme.success : BaumioTheme.secondaryText)
+                                            .font(.title3)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .disabled(isLocked)
+
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(entry.item)
+                                            .font(.subheadline)
+                                            .foregroundStyle(BaumioTheme.primaryText)
+                                        if !entry.room.isEmpty {
+                                            Text(entry.room)
+                                                .font(.caption)
+                                                .foregroundStyle(BaumioTheme.secondaryText)
+                                        }
+                                        if !entry.notes.isEmpty {
+                                            Text(entry.notes)
+                                                .font(.caption)
+                                                .foregroundStyle(BaumioTheme.secondaryText)
+                                        }
+                                    }
+                                    Spacer()
+                                    StatusBadge(title: entry.status.rawValue, color: handoverColor(entry.status))
+                                    if !isLocked {
+                                        Menu {
+                                            Button("Bearbeiten") { editingItem = .handover(entry) }
+                                            Divider()
+                                            ForEach(HandoverStatus.allCases) { status in
+                                                Button(status.rawValue) {
+                                                    model.handle { try await model.updateHandoverStatus(entry, status: status) }
+                                                }
+                                            }
+                                            Divider()
+                                            Button { signingItem = entry } label: {
+                                                Label("Einzelunterschrift", systemImage: "signature")
+                                            }
+                                            Divider()
+                                            Button("Löschen", role: .destructive) {
+                                                model.handle { try await model.deleteHandoverItem(entry) }
+                                            }
+                                        } label: {
+                                            Image(systemName: "ellipsis.circle")
+                                                .foregroundStyle(BaumioTheme.secondaryText)
+                                                .frame(width: 44, height: 44)
+                                        }
+                                    }
+                                }
+                            }
+
+                            if !isLocked {
+                                Divider()
+                                Button {
+                                    signingTrade = group.trade
+                                    showingProtocolSignature = true
+                                } label: {
+                                    Label("Abnahme für \(group.trade) unterzeichnen", systemImage: "signature")
+                                        .font(.subheadline.bold())
+                                        .foregroundStyle(BaumioTheme.accent)
+                                        .frame(maxWidth: .infinity, alignment: .center)
+                                        .padding(.vertical, 8)
+                                }
+                                .buttonStyle(.plain)
                             }
                         }
                     }
-                }
-            }
-            if !model.handoverItems.isEmpty && !isLocked {
-                PrimaryButton(title: "Abnahme finalisieren & unterschreiben", systemImage: "signature") {
-                    showingProtocolSignature = true
                 }
             }
         }
@@ -2335,7 +2523,7 @@ struct HandoverView: View {
             SignatureCaptureView(item: item, model: model)
         }
         .sheet(isPresented: $showingProtocolSignature) {
-            HandoverProtocolSignatureView(model: model, isPresented: $showingProtocolSignature)
+            HandoverProtocolSignatureView(trade: signingTrade, model: model, isPresented: $showingProtocolSignature)
         }
     }
 
@@ -2353,10 +2541,6 @@ struct HandoverView: View {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("Baumio_Checkliste_\(Int(Date().timeIntervalSince1970)).json")
         do { try data.write(to: url) } catch { return nil }
         return url
-    }
-
-    private func handoverSubtitle(_ entry: HandoverItem) -> String {
-        [entry.room, entry.tradeType].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
     private func handoverColor(_ status: HandoverStatus) -> Color {
@@ -3049,17 +3233,32 @@ struct OffersView: View {
     @State private var showingScanner = false
 
     private var groupedOffers: [(scope: String, offers: [OfferItem])] {
+        var groups: [(scope: String, offers: [OfferItem])] = []
+        var usedIDs = Set<UUID>()
+
+        // Zuerst nach expliziter Ausschreibungsbezeichnung (scope) gruppieren
         let byScope = Dictionary(grouping: model.offers.filter { !$0.scope.isEmpty }) { $0.scope }
-        return byScope.compactMap { key, values -> (scope: String, offers: [OfferItem])? in
-            guard values.count >= 2 else { return nil }
-            return (scope: key, offers: values.sorted { $0.amount < $1.amount })
-        }.sorted { $0.scope < $1.scope }
+        for (key, values) in byScope.sorted(by: { $0.key < $1.key }) {
+            guard values.count >= 2 else { continue }
+            groups.append((scope: key, offers: values.sorted { $0.amount < $1.amount }))
+            values.forEach { usedIDs.insert($0.id) }
+        }
+
+        // Fallback: verbleibende Angebote nach Gewerk (trade) gruppieren
+        let remaining = model.offers.filter { !usedIDs.contains($0.id) && !$0.trade.isEmpty }
+        let byTrade = Dictionary(grouping: remaining) { $0.trade }
+        for (key, values) in byTrade.sorted(by: { $0.key < $1.key }) {
+            guard values.count >= 2 else { continue }
+            groups.append((scope: key, offers: values.sorted { $0.amount < $1.amount }))
+            values.forEach { usedIDs.insert($0.id) }
+        }
+
+        return groups
     }
 
     private var ungroupedOffers: [OfferItem] {
-        let byScope = Dictionary(grouping: model.offers.filter { !$0.scope.isEmpty }) { $0.scope }
-        let singleScopeOffers = byScope.filter { $0.value.count < 2 }.flatMap { $0.value }
-        return model.offers.filter { $0.scope.isEmpty } + singleScopeOffers
+        let groupedIDs = Set(groupedOffers.flatMap { $0.offers.map { $0.id } })
+        return model.offers.filter { !groupedIDs.contains($0.id) }
     }
 
     var body: some View {
@@ -3712,6 +3911,7 @@ struct OfferComparisonCard: View {
     let onEdit: (OfferItem) -> Void
 
     private var cheapest: OfferItem? { offers.min(by: { $0.amount < $1.amount }) }
+    private var mostExpensive: OfferItem? { offers.max(by: { $0.amount < $1.amount }) }
     private var hasAccepted: Bool { offers.contains { $0.status == "Angenommen" } }
 
     var body: some View {
@@ -3726,6 +3926,42 @@ struct OfferComparisonCard: View {
                         .font(.caption)
                         .foregroundStyle(BaumioTheme.secondaryText)
                 }
+
+                // Preisbalken-Vergleich
+                if let maxAmount = mostExpensive?.amount, maxAmount > 0 {
+                    VStack(spacing: 6) {
+                        ForEach(offers) { offer in
+                            let fraction = maxAmount > 0
+                                ? CGFloat(truncating: (offer.amount / maxAmount) as NSDecimalNumber)
+                                : 0
+                            let isCheapest = offer.id == cheapest?.id
+                            HStack(spacing: 8) {
+                                Text(offer.provider)
+                                    .font(.caption)
+                                    .foregroundStyle(BaumioTheme.primaryText)
+                                    .frame(width: 80, alignment: .leading)
+                                    .lineLimit(1)
+                                GeometryReader { geo in
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .fill(isCheapest ? BaumioTheme.success : BaumioTheme.warning.opacity(0.7))
+                                        .frame(width: max(4, geo.size.width * fraction), height: 20)
+                                }
+                                .frame(height: 20)
+                                Text(offer.amount.euroString)
+                                    .font(.caption.bold())
+                                    .foregroundStyle(isCheapest ? BaumioTheme.success : BaumioTheme.primaryText)
+                                    .frame(width: 80, alignment: .trailing)
+                                if isCheapest && offers.count > 1 {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundStyle(BaumioTheme.success)
+                                        .font(.caption)
+                                }
+                            }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+
                 Divider()
                 ForEach(offers) { offer in
                     HStack(spacing: 8) {
@@ -4094,6 +4330,7 @@ struct DefectsView: View {
     @State private var tradeFilter = "Alle"
     @State private var statusFilter = "Alle"
     @State private var searchText = ""
+    @State private var isExportingWithFloorPlan = false
 
     private var tradeOptions: [String] {
         let names = model.defects.map(\.trade).filter { !$0.isEmpty }
@@ -4122,6 +4359,22 @@ struct DefectsView: View {
                 }
             }
             .disabled(model.defects.isEmpty)
+
+            if !model.floorPlans.isEmpty && !model.defects.filter({ $0.pinX != nil }).isEmpty {
+                SecondaryButton(
+                    title: isExportingWithFloorPlan ? "Wird erstellt …" : "PDF mit Grundriss & Legende",
+                    systemImage: "map"
+                ) {
+                    isExportingWithFloorPlan = true
+                    Task {
+                        if let url = await exportDefectsWithFloorPlan() {
+                            exportSheet = ShareableURL(url: url)
+                        }
+                        isExportingWithFloorPlan = false
+                    }
+                }
+                .disabled(model.defects.isEmpty || isExportingWithFloorPlan)
+            }
 
             SecondaryButton(title: "Grundriss", systemImage: "map") {
                 showingFloorPlan = true
@@ -4224,6 +4477,42 @@ struct DefectsView: View {
         } message: {
             Text("\(deletingDefect?.title ?? "dieser Mangel") wird unwiderruflich gelöscht.")
         }
+    }
+
+    // Lädt Grundrissbilder und erstellt PDF mit nummerierten Markierungen + Legende
+    @MainActor
+    private func exportDefectsWithFloorPlan() async -> URL? {
+        let defects = model.defects
+        // Globale Nummerierung: Reihenfolge wie in model.defects
+        let numberedDefects = Array(defects.enumerated()).map { (number: $0.offset + 1, defect: $0.element) }
+
+        var floorPlanDataList: [FloorPlanPinData] = []
+
+        for floorPlan in model.floorPlans {
+            let pinned = numberedDefects.filter {
+                $0.defect.floorPlanID == floorPlan.id && $0.defect.pinX != nil && $0.defect.pinY != nil
+            }
+            guard !pinned.isEmpty else { continue }
+
+            // Bild herunterladen
+            guard let url = try? await model.photoURL(bucket: "floor-plans", path: floorPlan.storagePath),
+                  let (data, _) = try? await URLSession.shared.data(from: url),
+                  let image = UIImage(data: data) else { continue }
+
+            let pins = pinned.map { entry in
+                (number: entry.number, x: entry.defect.pinX!, y: entry.defect.pinY!, title: entry.defect.title)
+            }
+            floorPlanDataList.append(FloorPlanPinData(label: floorPlan.label, image: image, pins: pins))
+        }
+
+        let page = DefectsPDFPage(
+            defects: defects,
+            projectName: model.selectedProject?.name ?? "Projekt",
+            exportDate: Date(),
+            project: model.selectedProject,
+            floorPlanData: floorPlanDataList
+        )
+        return PDFExporter.export(page, fileName: "Maengelliste_Grundriss.pdf")
     }
 }
 

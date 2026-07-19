@@ -116,6 +116,25 @@ struct Project: Identifiable, Hashable {
     var handoverSig2Path: String? = nil
 }
 
+struct FavoriteFirm: Identifiable, Codable, Hashable {
+    var id: UUID = UUID()
+    var name: String
+    var company: String
+    var tradeType: String
+    var phone: String
+    var email: String
+    var address: String
+
+    init(from trade: Trade) {
+        self.name = trade.name
+        self.company = trade.company
+        self.tradeType = trade.tradeType
+        self.phone = trade.phone
+        self.email = trade.email
+        self.address = trade.address
+    }
+}
+
 struct Trade: Identifiable, Hashable {
     var id = UUID()
     var name: String
@@ -339,6 +358,19 @@ struct HandoverItem: Identifiable, Hashable {
     var isDone: Bool
     var notes: String
     var signatureURL: String? = nil
+}
+
+struct AbnahmeRecord: Identifiable, Hashable {
+    var id: UUID = UUID()
+    var projectID: UUID
+    var trade: String
+    var signedAt: Date?
+    var sig1Path: String?
+    var sig2Path: String?
+    var notes: String = ""
+    var createdAt: Date = Date()
+
+    var isSigned: Bool { signedAt != nil }
 }
 
 struct DefectComment: Identifiable, Hashable {

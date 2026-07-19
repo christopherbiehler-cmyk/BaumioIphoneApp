@@ -46,6 +46,7 @@ final class BaumioAppViewModel {
     var timeLogs: [TimeLogItem] = []
     var handoverItems: [HandoverItem] = []
     var floorPlans: [FloorPlan] = []
+    var abnahmen: [AbnahmeRecord] = []
     var projectMembers: [ProjectMember] = []
     var pendingInvites: [ProjectMember] = []
     var displayName = ""
@@ -773,6 +774,39 @@ final class BaumioAppViewModel {
         }
     }
 
+    func finalizeAbnahme(trade: String, sig1Data: Data, sig2Data: Data) async throws {
+        let context = try supabaseContext()
+        guard let project = selectedProject else { throw SupabaseError.missingProject }
+        guard let userID = supabaseSession?.user?.id else { throw SupabaseError.missingSession }
+        let timestamp = Int(Date().timeIntervalSince1970)
+        let sig1Path = "\(userID)/abnahmen/\(project.id.uuidString)-\(timestamp)-bauherr.png"
+        let sig2Path = "\(userID)/abnahmen/\(project.id.uuidString)-\(timestamp)-handwerker.png"
+        try await supabase.uploadToStorage(bucket: "signatures", path: sig1Path, data: sig1Data, contentType: "image/png", accessToken: context.accessToken)
+        try await supabase.uploadToStorage(bucket: "signatures", path: sig2Path, data: sig2Data, contentType: "image/png", accessToken: context.accessToken)
+        let signedAt = ISO8601DateFormatter().string(from: Date())
+        let rows: [SupabaseAbnahmeRow] = try await supabase.insertReturning(
+            NewSupabaseAbnahme(projectID: project.id, userID: userID, trade: trade),
+            into: "abnahmen",
+            accessToken: context.accessToken
+        )
+        guard let row = rows.first else { throw SupabaseError.invalidResponse }
+        try await supabase.update(
+            UpdateSupabaseAbnahme(signedAt: signedAt, sig1Path: sig1Path, sig2Path: sig2Path),
+            in: "abnahmen", id: row.id, accessToken: context.accessToken
+        )
+        var record = row.appAbnahme
+        record.signedAt = Date()
+        record.sig1Path = sig1Path
+        record.sig2Path = sig2Path
+        abnahmen.append(record)
+    }
+
+    func deleteAbnahme(_ abnahme: AbnahmeRecord) async throws {
+        let context = try supabaseContext()
+        try await supabase.delete(from: "abnahmen", id: abnahme.id, accessToken: context.accessToken)
+        abnahmen.removeAll { $0.id == abnahme.id }
+    }
+
     func clearDefectPin(_ defect: DefectItem) async throws {
         let context = try supabaseContext()
         let encoded = DefectMetaCoder.encode(trade: defect.trade, responsible: defect.responsible, deadline: defect.deadline, userNotes: defect.description, pinX: nil, pinY: nil)
@@ -801,6 +835,7 @@ final class BaumioAppViewModel {
         funding = details.funding
         reviews = details.reviews
         floorPlans = details.floorPlans.sorted { $0.sortOrder < $1.sortOrder }
+        abnahmen = details.abnahmen
         await refreshStorageUsage()
         await loadPhotos(accessToken: accessToken)
     }
