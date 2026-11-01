@@ -1,6 +1,6 @@
 import Foundation
 
-struct SupabaseConfig {
+nonisolated struct SupabaseConfig {
     let projectURL: URL
     let anonKey: String
 
@@ -579,6 +579,29 @@ struct UpdateSupabaseDefect: Encodable, Sendable {
     let status: String
 }
 
+/// Mangel komplett aktualisieren – `floor_plan_id` wird auch als `null` gesendet (Zuordnung entfernen).
+struct UpdateSupabaseDefectFull: Encodable, Sendable {
+    let description: String
+    let severity: String?
+    let importance: String?
+    let status: String
+    let floorPlanID: UUID?
+
+    enum CodingKeys: String, CodingKey {
+        case description, severity, importance, status
+        case floorPlanID = "floor_plan_id"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(description, forKey: .description)
+        try c.encode(severity, forKey: .severity)
+        try c.encode(importance, forKey: .importance)
+        try c.encode(status, forKey: .status)
+        try c.encode(floorPlanID, forKey: .floorPlanID)
+    }
+}
+
 struct UpdateSupabaseDefectDescription: Encodable, Sendable {
     let description: String
 }
@@ -646,8 +669,8 @@ struct SupabaseAppointmentRow: Decodable, Sendable {
     let notes: String?
 
     var appScheduleItem: ScheduleItem {
-        let (startTime, endTime, cleanNotes) = AppointmentTimeCoder.decode(notes)
-        return ScheduleItem(id: id, title: title, date: BaumioDateFormatter.shared.date(from: date) ?? Date(), durationDays: 1, status: WorkStatus(appointmentValue: status), trade: "", notes: cleanNotes, startTime: startTime, endTime: endTime)
+        let (startTime, endTime, dependsOn, durationDays, cleanNotes) = AppointmentTimeCoder.decode(notes)
+        return ScheduleItem(id: id, title: title, date: BaumioDateFormatter.shared.date(from: date) ?? Date(), durationDays: durationDays, status: WorkStatus(appointmentValue: status), trade: "", notes: cleanNotes, dependsOn: dependsOn, startTime: startTime, endTime: endTime)
     }
 }
 
@@ -761,7 +784,7 @@ struct SupabaseCostRow: Decodable, Sendable {
         let normalizedStatus = status ?? CostStatusValue.open
         let ordered = CostStatusValue.isOrdered(normalizedStatus) ? amount : 0
         let paid = CostStatusValue.isPaid(normalizedStatus) ? amount : 0
-        let (fundingID, cleanNotes) = FundingLinkCoder.decode(notes)
+        let (fundingID, tradeID, cleanNotes) = FundingLinkCoder.decodeFull(notes)
         // Geplant = planned_amount falls gesetzt, sonst der Betrag (wie die Website).
         return CostItem(
             id: id,
@@ -775,6 +798,7 @@ struct SupabaseCostRow: Decodable, Sendable {
             invoiceReference: invoiceNumber ?? "",
             notes: cleanNotes,
             fundingItemID: fundingID,
+            tradeID: tradeID,
             invoiceDate: invoiceDate.flatMap { BaumioDateFormatter.shared.date(from: $0) },
             dueDate: dueDate.flatMap { BaumioDateFormatter.shared.date(from: $0) },
             laborAmount: laborAmount ?? 0,
@@ -960,6 +984,7 @@ struct NewSupabaseHandover: Encodable, Sendable {
     let room: String?
     let tradeType: String?
     let status: String
+    let notes: String?
 
     enum CodingKeys: String, CodingKey {
         case projectID = "project_id"
@@ -967,6 +992,7 @@ struct NewSupabaseHandover: Encodable, Sendable {
         case room
         case tradeType = "trade_type"
         case status
+        case notes
     }
 }
 
@@ -1216,62 +1242,81 @@ enum AppointmentTimeCoder {
         return f
     }()
 
-    static func encode(startTime: Date?, endTime: Date?, userNotes: String) -> String? {
-        guard startTime != nil || endTime != nil else {
+    /// Format: `#TIME:start=09:00,end=10:30,dep=<UUID>,days=3` (alle Felder optional).
+    static func encode(startTime: Date?, endTime: Date?, dependsOn: UUID? = nil, durationDays: Int = 1, userNotes: String) -> String? {
+        let hasDuration = durationDays > 1
+        guard startTime != nil || endTime != nil || dependsOn != nil || hasDuration else {
             let trimmed = userNotes.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? nil : trimmed
         }
         var parts: [String] = []
         if let s = startTime { parts.append("start=\(timeFormatter.string(from: s))") }
         if let e = endTime { parts.append("end=\(timeFormatter.string(from: e))") }
+        if let dependsOn { parts.append("dep=\(dependsOn.uuidString)") }
+        if hasDuration { parts.append("days=\(durationDays)") }
         let header = "#TIME:" + parts.joined(separator: ",")
         let trimmed = userNotes.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? header : header + "\n" + trimmed
     }
 
-    static func decode(_ raw: String?) -> (startTime: Date?, endTime: Date?, userNotes: String) {
-        guard let raw, !raw.isEmpty else { return (nil, nil, "") }
+    static func decode(_ raw: String?) -> (startTime: Date?, endTime: Date?, dependsOn: UUID?, durationDays: Int, userNotes: String) {
+        guard let raw, !raw.isEmpty else { return (nil, nil, nil, 1, "") }
         let parts = raw.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
-        guard let first = parts.first, first.hasPrefix("#TIME:") else { return (nil, nil, raw) }
+        guard let first = parts.first, first.hasPrefix("#TIME:") else { return (nil, nil, nil, 1, raw) }
         let userNotes = parts.count > 1 ? parts[1] : ""
         var startTime: Date? = nil
         var endTime: Date? = nil
+        var dependsOn: UUID? = nil
+        var durationDays = 1
         for pair in first.dropFirst(6).split(separator: ",") {
             let kv = pair.split(separator: "=", maxSplits: 1).map(String.init)
             guard kv.count == 2 else { continue }
             switch kv[0] {
             case "start": startTime = timeFormatter.date(from: kv[1])
             case "end":   endTime   = timeFormatter.date(from: kv[1])
+            case "dep":   dependsOn = UUID(uuidString: kv[1])
+            case "days":  durationDays = max(Int(kv[1]) ?? 1, 1)
             default: break
             }
         }
-        return (startTime, endTime, userNotes)
+        return (startTime, endTime, dependsOn, durationDays, userNotes)
     }
 }
 
+/// Format: `#FUND:id=<UUID>,trade=<UUID>` (beide Felder optional; `trade` ordnet Kosten einer Firma zu).
 enum FundingLinkCoder {
-    static func encode(fundingID: UUID?, userNotes: String) -> String? {
-        guard let fundingID else {
-            let trimmed = userNotes.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : trimmed
-        }
-        let header = "#FUND:id=\(fundingID.uuidString)"
+    static func encode(fundingID: UUID?, tradeID: UUID? = nil, userNotes: String) -> String? {
         let trimmed = userNotes.trimmingCharacters(in: .whitespacesAndNewlines)
+        var parts: [String] = []
+        if let fundingID { parts.append("id=\(fundingID.uuidString)") }
+        if let tradeID { parts.append("trade=\(tradeID.uuidString)") }
+        guard !parts.isEmpty else { return trimmed.isEmpty ? nil : trimmed }
+        let header = "#FUND:" + parts.joined(separator: ",")
         return trimmed.isEmpty ? header : header + "\n" + trimmed
     }
 
-    static func decode(_ raw: String?) -> (fundingID: UUID?, userNotes: String) {
-        guard let raw, !raw.isEmpty else { return (nil, "") }
+    static func decodeFull(_ raw: String?) -> (fundingID: UUID?, tradeID: UUID?, userNotes: String) {
+        guard let raw, !raw.isEmpty else { return (nil, nil, "") }
         let parts = raw.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
-        guard let first = parts.first, first.hasPrefix("#FUND:") else { return (nil, raw) }
+        guard let first = parts.first, first.hasPrefix("#FUND:") else { return (nil, nil, raw) }
         let userNotes = parts.count > 1 ? parts[1] : ""
         var fundingID: UUID? = nil
+        var tradeID: UUID? = nil
         for pair in first.dropFirst(6).split(separator: ",") {
             let kv = pair.split(separator: "=", maxSplits: 1).map(String.init)
-            guard kv.count == 2, kv[0] == "id" else { continue }
-            fundingID = UUID(uuidString: kv[1])
+            guard kv.count == 2 else { continue }
+            switch kv[0] {
+            case "id": fundingID = UUID(uuidString: kv[1])
+            case "trade": tradeID = UUID(uuidString: kv[1])
+            default: break
+            }
         }
-        return (fundingID, userNotes)
+        return (fundingID, tradeID, userNotes)
+    }
+
+    static func decode(_ raw: String?) -> (fundingID: UUID?, userNotes: String) {
+        let full = decodeFull(raw)
+        return (full.fundingID, full.userNotes)
     }
 }
 
@@ -1411,7 +1456,8 @@ struct SupabaseTradeRatingRow: Decodable, Sendable {
             quality: quality ?? 3,
             punctuality: punctuality ?? 3,
             communication: communication ?? 3,
-            pricePerformance: pricePerformance ?? 3
+            pricePerformance: pricePerformance ?? 3,
+            tradeID: tradeID
         )
     }
 }
@@ -1571,7 +1617,7 @@ struct SupabaseService: Sendable {
     func signUp(email: String, password: String) async throws -> SupabaseSession? {
         let endpoint = try endpoint(path: "auth/v1/signup")
         do {
-            return try await sendAuth(endpoint: endpoint, body: AuthRequest(email: email, password: password))
+            return try await sendAuth(endpoint: endpoint, body: SignUpRequest(email: email, password: password, data: ["signup_source": "ios"]))
         } catch SupabaseError.emailConfirmationRequired {
             return nil
         }
@@ -1694,16 +1740,18 @@ struct SupabaseService: Sendable {
         let _: EmptySupabaseResponse = try await sendRest(endpoint: endpoint, method: "PATCH", accessToken: accessToken, body: Patch(status: "accepted"), prefer: "return=minimal")
     }
 
-    /// Löscht das Konto samt Daten über die Edge Function `delete-account` (nutzt den User-JWT).
-    func deleteAccount(accessToken: String) async throws {
-        guard let config else { throw SupabaseError.notConfigured }
-        let endpoint = try endpoint(path: "functions/v1/delete-account")
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = "POST"
-        request.setValue(config.anonKey, forHTTPHeaderField: "apikey")
-        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+    /// Meldet die Installation über die RPC `register_device` an.
+    func registerDevice(deviceID: String, label: String, accessToken: String) async throws -> DeviceRegistrationResult {
+        struct Params: Encodable {
+            let pDeviceID: String, pPlatform: String, pLabel: String
+            enum CodingKeys: String, CodingKey { case pDeviceID = "p_device_id", pPlatform = "p_platform", pLabel = "p_label" }
+        }
+        let endpoint = try endpoint(path: "rest/v1/rpc/register_device")
+        var request = try restRequest(endpoint: endpoint, method: "POST", accessToken: accessToken)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        let _: EmptySupabaseResponse = try await decode(request: request)
+        request.httpBody = try JSONEncoder().encode(Params(pDeviceID: deviceID, pPlatform: "ios", pLabel: label))
+        return try await decode(request: request, logLevel: .warn)
     }
 
     func signInWithApple(idToken: String, nonce: String) async throws -> SupabaseSession {
@@ -1732,14 +1780,6 @@ struct SupabaseService: Sendable {
         return rows.map(\.appMember)
     }
 
-    /// Setzt `profiles.plan` (nach erfolgreichem App-Kauf) – dieselbe Spalte wie die Website.
-    func setPlan(userID: UUID, plan: String, accessToken: String) async throws {
-        let endpoint = try endpoint(path: "rest/v1/profiles", query: [
-            URLQueryItem(name: "id", value: "eq.\(userID.uuidString)")
-        ])
-        let _: EmptySupabaseResponse = try await sendRest(endpoint: endpoint, method: "PATCH", accessToken: accessToken, body: UpdateSupabaseProfilePlan(plan: plan), prefer: "return=minimal")
-    }
-
     func fetchProjects(accessToken: String) async throws -> [Project] {
         let fullSelect = "id,user_id,name,status,budget,start_date,end_date,description,progress_by_costs,eigenkapital,kredit,floor_plan_path,handover_signed_at,handover_sig1_path,handover_sig2_path"
         let baseSelect = "id,user_id,name,status,budget,start_date,end_date,description,progress_by_costs,eigenkapital,kredit"
@@ -1750,8 +1790,9 @@ struct SupabaseService: Sendable {
             ])
             let rows: [SupabaseProject] = try await sendRest(endpoint: ep, method: "GET", accessToken: accessToken)
             return rows.map(\.appProject)
-        } catch {
-            // Fallback: SQL-Migration noch nicht ausgeführt → neue Spalten weglassen
+        } catch SupabaseError.requestFailed {
+            // Fallback nur bei Server-Fehlern (z. B. SQL-Migration noch nicht ausgeführt → neue Spalten weglassen).
+            // Netzwerk- und Auth-Fehler werden bewusst weitergereicht.
             let ep = try endpoint(path: "rest/v1/projects", query: [
                 URLQueryItem(name: "select", value: baseSelect),
                 URLQueryItem(name: "order", value: "created_at.desc")
@@ -1795,19 +1836,19 @@ struct SupabaseService: Sendable {
         let abnahmenData = (try? await abnahmenRows) ?? []
 
         return try await ProjectDetails(
-            trades: tradeRows.map(\.appTrade),
-            schedule: appointments.map(\.appScheduleItem),
+            trades: tradeRows.map(\.appTrade).sorted { ($0.company.isEmpty ? $0.name : $0.company).localizedCaseInsensitiveCompare($1.company.isEmpty ? $1.name : $1.company) == .orderedAscending },
+            schedule: appointments.map(\.appScheduleItem).sorted { $0.date < $1.date },
             tasks: todos.map(\.appTask),
-            materials: materials.map(\.appMaterial),
+            materials: materials.map(\.appMaterial).sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending },
             costs: costs.map(\.appCost),
-            offers: quotes.map(\.appOffer),
+            offers: quotes.map(\.appOffer).sorted { $0.provider.localizedCaseInsensitiveCompare($1.provider) == .orderedAscending },
             defects: defects.map(\.appDefect),
-            diary: diary.map(\.appDiaryEntry),
+            diary: diary.map(\.appDiaryEntry).sorted { $0.date > $1.date },
             documents: documents.map(\.appDocument),
-            timeLogs: timeLogs.map(\.appTimeLog),
+            timeLogs: timeLogs.map(\.appTimeLog).sorted { $0.date > $1.date },
             handoverItems: handover.map(\.appHandoverItem),
             funding: subsidyRows.map(\.appFunding),
-            reviews: ratingRows.map { $0.appReview(trade: tradeLookup[$0.tradeID ?? UUID()]) },
+            reviews: ratingRows.map { $0.appReview(trade: $0.tradeID.flatMap { tradeLookup[$0] }) },
             floorPlans: floorPlanRows.map(\.appFloorPlan),
             abnahmen: abnahmenData.map(\.appAbnahme)
         )
@@ -1887,23 +1928,38 @@ struct SupabaseService: Sendable {
     /// Lädt Foto-Verweise (id, Pfad, Eltern-ID) einer Foto-Tabelle für mehrere Eltern-Einträge.
     func fetchPhotos(table: String, parentColumn: String, parentIDs: [UUID], accessToken: String) async throws -> [SupabasePhotoRow] {
         guard !parentIDs.isEmpty else { return [] }
-        let list = parentIDs.map(\.uuidString).joined(separator: ",")
-        let endpoint = try endpoint(path: "rest/v1/\(table)", query: [
-            URLQueryItem(name: "select", value: "id,storage_path,parent:\(parentColumn)"),
-            URLQueryItem(name: parentColumn, value: "in.(\(list))")
-        ])
-        return try await sendRest(endpoint: endpoint, method: "GET", accessToken: accessToken)
+        var result: [SupabasePhotoRow] = []
+        // In Blöcken abfragen, damit die URL bei vielen Einträgen nicht zu lang wird.
+        for chunk in Self.chunks(parentIDs, size: 40) {
+            let list = chunk.map(\.uuidString).joined(separator: ",")
+            let endpoint = try endpoint(path: "rest/v1/\(table)", query: [
+                URLQueryItem(name: "select", value: "id,storage_path,parent:\(parentColumn)"),
+                URLQueryItem(name: parentColumn, value: "in.(\(list))")
+            ])
+            let rows: [SupabasePhotoRow] = try await sendRest(endpoint: endpoint, method: "GET", accessToken: accessToken)
+            result.append(contentsOf: rows)
+        }
+        return result
     }
 
     func fetchDefectComments(defectIDs: [UUID], accessToken: String) async throws -> [SupabaseDefectCommentRow] {
         guard !defectIDs.isEmpty else { return [] }
-        let list = defectIDs.map(\.uuidString).joined(separator: ",")
-        let endpoint = try endpoint(path: "rest/v1/defect_comments", query: [
-            URLQueryItem(name: "select", value: "id,defect_id,text,author,created_at"),
-            URLQueryItem(name: "defect_id", value: "in.(\(list))"),
-            URLQueryItem(name: "order", value: "created_at.asc")
-        ])
-        return try await sendRest(endpoint: endpoint, method: "GET", accessToken: accessToken)
+        var result: [SupabaseDefectCommentRow] = []
+        for chunk in Self.chunks(defectIDs, size: 40) {
+            let list = chunk.map(\.uuidString).joined(separator: ",")
+            let endpoint = try endpoint(path: "rest/v1/defect_comments", query: [
+                URLQueryItem(name: "select", value: "id,defect_id,text,author,created_at"),
+                URLQueryItem(name: "defect_id", value: "in.(\(list))"),
+                URLQueryItem(name: "order", value: "created_at.asc")
+            ])
+            let rows: [SupabaseDefectCommentRow] = try await sendRest(endpoint: endpoint, method: "GET", accessToken: accessToken)
+            result.append(contentsOf: rows)
+        }
+        return result
+    }
+
+    private static func chunks<T>(_ array: [T], size: Int) -> [[T]] {
+        stride(from: 0, to: array.count, by: size).map { Array(array[$0..<min($0 + size, array.count)]) }
     }
 
     /// Liest den aktuellen Speicherverbrauch des Nutzers (Bytes) aus der View.
@@ -1959,13 +2015,28 @@ struct SupabaseService: Sendable {
         return request
     }
 
-    private func decode<ResponseBody: Decodable>(request: URLRequest) async throws -> ResponseBody {
-        let (data, response) = try await session.data(for: request)
+    private func decode<ResponseBody: Decodable>(request: URLRequest, logLevel: ErrorLogger.Level = .error) async throws -> ResponseBody {
+        let context = Self.logContext(for: request)
+        let logURL = ErrorLogger.safeURL(request.url)
+        let isAuthEndpoint = request.url?.path.hasPrefix("/auth/") == true
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            ErrorLogger.report(error, context: context, level: .warn, url: logURL)
+            throw error
+        }
         guard let httpResponse = response as? HTTPURLResponse else { throw SupabaseError.invalidResponse }
         guard 200..<300 ~= httpResponse.statusCode else {
             if httpResponse.statusCode == 401 { throw SupabaseError.unauthorized }
             let errResponse = try? JSONDecoder().decode(SupabaseErrorResponse.self, from: data)
             let message = errResponse?.bestMessage ?? "Supabase-Fehler: HTTP \(httpResponse.statusCode)"
+            // Falsche Eingaben bei Login/Registrierung sind keine App-Fehler.
+            if !(isAuthEndpoint && [400, 422, 429].contains(httpResponse.statusCode)) {
+                ErrorLogger.report(logLevel, context: context, message: "HTTP \(httpResponse.statusCode): \(message)", url: logURL)
+            }
             // Klare deutsche Fehlermeldung für häufige Auth-Fehler
             let friendlyMessage: String
             switch message.lowercased() {
@@ -1998,7 +2069,27 @@ struct SupabaseService: Sendable {
                json["user"] != nil, json["access_token"] == nil {
                 throw SupabaseError.emailConfirmationRequired
             }
+            ErrorLogger.report(error, context: context + ".decode", level: logLevel, url: logURL)
             throw SupabaseError.invalidResponse
+        }
+    }
+
+    /// Leitet aus der Anfrage einen sprechenden Log-Kontext ab, z. B. `rest.projects.get` oder `storage.upload.floor-plans`.
+    private static func logContext(for request: URLRequest) -> String {
+        let parts = request.url?.pathComponents.filter { $0 != "/" } ?? []
+        let method = (request.httpMethod ?? "GET").lowercased()
+        guard parts.count >= 3 else { return "supabase.\(method)" }
+        switch parts[0] {
+        case "rest":
+            if parts[2] == "rpc", parts.count > 3 { return "rpc.\(parts[3])" }
+            return "rest.\(parts[2]).\(method)"
+        case "storage":
+            let bucketIndex = parts.count > 3 && parts[3] == "sign" ? 4 : 3
+            let bucket = parts.count > bucketIndex ? parts[bucketIndex] : "?"
+            let operation = method == "post" && bucketIndex == 3 ? "upload" : (method == "delete" ? "delete" : "read")
+            return "storage.\(operation).\(bucket)"
+        default:
+            return "\(parts[0]).\(parts[2])"
         }
     }
 }
@@ -2051,6 +2142,7 @@ struct NewSupabaseProjectMember: Encodable, Sendable {
 }
 
 private struct AuthRequest: Encodable { let email: String; let password: String }
+private struct SignUpRequest: Encodable { let email: String; let password: String; let data: [String: String] }
 private struct EmailRequest: Encodable { let email: String }
 private struct RefreshRequest: Encodable {
     let refreshToken: String
@@ -2075,9 +2167,6 @@ struct SupabaseProfileRow: Decodable, Sendable {
     let plan: String?
 }
 
-struct UpdateSupabaseProfilePlan: Encodable, Sendable {
-    let plan: String
-}
 private struct SupabaseErrorResponse: Decodable {
     let message: String?
     let errorDescription: String?   // Auth-Endpunkte nutzen "error_description"
@@ -2222,6 +2311,12 @@ extension String {
         case "bewilligt": "Bewilligt"
         case "ausgezahlt": "Ausgezahlt"
         case "abgelehnt": "Abgelehnt"
+        case "beauftragt": "Beauftragt"
+        case "bezahlt": "Bezahlt"
+        case "storniert": "Storniert"
+        case "angefragt": "Angefragt"
+        case "leicht bewölkt": "Leicht bewölkt"
+        case "nebelig": "Nebelig"
         default: self
         }
     }

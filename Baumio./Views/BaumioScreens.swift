@@ -25,7 +25,7 @@ private func csvURL(_ rows: [[String]], fileName: String) -> URL? {
     let content = "sep=;\n" + body
     guard let data = content.data(using: .utf8) else { return nil }
     let url = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
-    try? data.write(to: url)
+    do { try data.write(to: url) } catch { return nil }
     return url
 }
 
@@ -42,10 +42,33 @@ private final class LocationFetcher: NSObject, CLLocationManagerDelegate, @unche
     }
 
     func fetchLocation() async -> CLLocation? {
-        manager.requestWhenInUseAuthorization()
+        switch manager.authorizationStatus {
+        case .denied, .restricted:
+            return nil
+        default:
+            break
+        }
         return await withCheckedContinuation { cont in
             self.continuation = cont
-            self.manager.requestLocation()
+            if manager.authorizationStatus == .notDetermined {
+                // Standortabfrage startet erst, nachdem der Nutzer die Berechtigung erteilt hat.
+                manager.requestWhenInUseAuthorization()
+            } else {
+                manager.requestLocation()
+            }
+        }
+    }
+
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        guard continuation != nil else { return }
+        switch manager.authorizationStatus {
+        case .authorizedWhenInUse, .authorizedAlways:
+            manager.requestLocation()
+        case .denied, .restricted:
+            continuation?.resume(returning: nil)
+            continuation = nil
+        default:
+            break
         }
     }
 
@@ -61,16 +84,16 @@ private final class LocationFetcher: NSObject, CLLocationManagerDelegate, @unche
 }
 
 private func wmoCodeToGerman(_ code: Int) -> String {
+    // Rückgabewerte entsprechen exakt den Auswahlmöglichkeiten im Bautagebuch (sonnig, bewölkt, regnerisch, schnee, sturm).
     switch code {
-    case 0:            return "sonnig"
-    case 1, 2:         return "leicht bewölkt"
-    case 3:            return "bewölkt"
-    case 45, 48:       return "nebelig"
-    case 51...65:      return "regnerisch"
+    case 0, 1:         return "sonnig"
+    case 2, 3:         return "bewölkt"
+    case 45, 48:       return "bewölkt"
+    case 51...67:      return "regnerisch"
     case 80...82:      return "regnerisch"
     case 71...77:      return "schnee"
     case 85, 86:       return "schnee"
-    case 95, 96, 99:   return "sturm"
+    case 95...99:      return "sturm"
     default:           return "bewölkt"
     }
 }
@@ -162,7 +185,7 @@ struct ContactImportSheet: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Abbrechen") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Speichern") {
-                        model.handle { try await model.createTrade(name: name, company: company, tradeType: tradeType, address: address, phone: phone, email: email, notes: "") }
+                        model.handle { try await model.createTrade(name: name.isEmpty ? company : name, company: company, tradeType: tradeType, address: address, phone: phone, email: email, notes: "") }
                         dismiss()
                     }
                     .disabled(name.isEmpty && company.isEmpty)
@@ -203,6 +226,7 @@ struct ProjectSetupWizardView: View {
     @State private var startDate = Date()
     @State private var endDate = Calendar.current.date(byAdding: .year, value: 2, to: Date()) ?? Date()
     @State private var isCreating = false
+    @State private var creationError: String?
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     var body: some View {
@@ -234,7 +258,7 @@ struct ProjectSetupWizardView: View {
             }
             .background(BaumioTheme.background)
         }
-        .preferredColorScheme(.dark)
+        .appAppearance()
     }
 
     private var step1: some View {
@@ -375,6 +399,12 @@ struct ProjectSetupWizardView: View {
                     }
                 }
 
+                if let creationError {
+                    Text(creationError)
+                        .font(.footnote)
+                        .foregroundStyle(BaumioTheme.warning)
+                }
+
                 HStack(spacing: 12) {
                     SecondaryButton(title: "Zurück", systemImage: "arrow.left") {
                         withAnimation { step = 1 }
@@ -382,10 +412,23 @@ struct ProjectSetupWizardView: View {
                     PrimaryButton(title: isCreating ? "Erstelle …" : "Projekt erstellen", systemImage: "plus.circle.fill") {
                         Task {
                             isCreating = true
+                            creationError = nil
                             let budget = Decimal(string: budgetText.replacingOccurrences(of: ",", with: ".")) ?? 0
-                            try? await model.createProject(name: projectName, budget: budget, status: .active, description: address.isEmpty ? nil : address)
+                            do {
+                                try await model.createProject(
+                                    name: projectName.trimmingCharacters(in: .whitespacesAndNewlines),
+                                    budget: budget,
+                                    status: .active,
+                                    description: address.isEmpty ? nil : address,
+                                    startDate: startDate,
+                                    endDate: endDate
+                                )
+                                isPresented = false
+                            } catch {
+                                // Fehler anzeigen statt den Assistenten stillschweigend zu schließen.
+                                creationError = error.localizedDescription
+                            }
                             isCreating = false
-                            isPresented = false
                         }
                     }
                     .disabled(isCreating)
@@ -426,7 +469,7 @@ struct AppTourView: View {
             bullets: [
                 "Projekte, Kosten und Termine zentral verwalten",
                 "Bautagebuch und Dokumente immer dabei",
-                "Deutsch, datenschutzfreundlich, kein Tracking"
+                "Auf Deutsch und datenschutzfreundlich – ohne Werbe-Tracking"
             ]
         ),
         TourSlide(
@@ -559,7 +602,7 @@ struct OnboardingView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         FeatureRow(title: "Alle Bauprojekte strukturiert verwalten")
                         FeatureRow(title: "Dokumente, Kosten und Mängel an einem Ort")
-                        FeatureRow(title: "Deutsch, datenschutzfreundlich und ohne Tracking")
+                        FeatureRow(title: "Deutsch, datenschutzfreundlich und ohne Werbe-Tracking")
                     }
                 }
 
@@ -569,7 +612,7 @@ struct OnboardingView: View {
                     AppleSignInButton(model: model)
                 }
 
-                Text("Baumio ist vollständig auf Deutsch vorbereitet. Personenbezogene Daten werden erst verarbeitet, wenn du dich aktiv anmeldest oder später ein Backend verbindest.")
+                Text("Personenbezogene Daten werden erst verarbeitet, wenn du dich aktiv anmeldest. Details findest du in der Datenschutzerklärung unter baumio.eu/datenschutz.")
                     .font(.footnote)
                     .foregroundStyle(BaumioTheme.secondaryText)
             }
@@ -611,6 +654,11 @@ struct AppleSignInButton: View {
                 model.authError = "Apple-Anmeldung fehlgeschlagen: Es wurde kein gültiges Token empfangen."
                 return
             }
+            // Apple liefert den Namen nur beim ersten Login – direkt als Anzeigenamen übernehmen.
+            if model.displayName.isEmpty, let fullName = credential.fullName {
+                let name = [fullName.givenName, fullName.familyName].compactMap { $0 }.joined(separator: " ")
+                if !name.isEmpty { model.updateDisplayName(name) }
+            }
             Task { await model.signInWithApple(idToken: token, nonce: nonce) }
         case .failure(let error):
             let code = (error as? ASAuthorizationError)?.code
@@ -649,11 +697,17 @@ struct AuthView: View {
                     }
                     .pickerStyle(.segmented)
                     .accessibilityLabel("Anmeldeart")
+                    .onChange(of: mode) { _, _ in
+                        model.authError = nil
+                        model.authInfo = nil
+                    }
 
                     BaumioCard {
                         VStack(alignment: .leading, spacing: 14) {
                             TextField("E-Mail", text: $model.email)
                                 .textContentType(.emailAddress)
+                                .keyboardType(.emailAddress)
+                                .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
                                 .accessibilityLabel("E-Mail-Adresse")
                             SecureField("Passwort", text: $model.password)
@@ -672,7 +726,7 @@ struct AuthView: View {
                                     .foregroundStyle(BaumioTheme.secondaryText)
                             }
 
-                            PrimaryButton(title: mode.rawValue, systemImage: "person.fill") {
+                            PrimaryButton(title: model.isLoading ? "Bitte warten …" : mode.rawValue, systemImage: "person.fill") {
                                 Task {
                                     if mode == .login {
                                         await model.login()
@@ -681,6 +735,8 @@ struct AuthView: View {
                                     }
                                 }
                             }
+                            .disabled(model.isLoading)
+                            .opacity(model.isLoading ? 0.6 : 1)
 
                             Button("Passwort vergessen") {
                                 model.resetPassword()
@@ -750,7 +806,7 @@ struct DashboardView: View {
                                 Text("\(model.pendingInvites.count) offene Projekteinladung\(model.pendingInvites.count == 1 ? "" : "en")")
                                     .font(.subheadline.bold())
                                     .foregroundStyle(BaumioTheme.primaryText)
-                                Text("Tippe um einzuladen oder abzulehnen")
+                                Text("Tippe, um sie unter Projektmitglieder anzunehmen oder abzulehnen")
                                     .font(.caption)
                                     .foregroundStyle(BaumioTheme.secondaryText)
                             }
@@ -802,12 +858,12 @@ struct DashboardView: View {
                 }
 
                 AdaptiveGrid(minimum: 170) {
-                    DashboardMetricCard(title: "Projektfortschritt", value: "\(Int(project.progress * 100)) %", subtitle: "Projektwert", systemImage: "chart.line.uptrend.xyaxis")
-                    DashboardMetricCard(title: "Kostenübersicht", value: model.orderedCosts.euroString, subtitle: "von \(project.budget.euroString) Budget", systemImage: "eurosign.circle", tint: BaumioTheme.info)
-                    DashboardMetricCard(title: "Nächste Termine", value: "\(model.schedule.filter { $0.date >= Date() }.count)", subtitle: "in der Zukunft", systemImage: "calendar", tint: BaumioTheme.accent)
+                    DashboardMetricCard(title: "Projektfortschritt", value: "\(model.overallProgress) %", subtitle: "Aufgaben, Kosten, Material, Zeitplan", systemImage: "chart.line.uptrend.xyaxis")
+                    DashboardMetricCard(title: "Kostenübersicht", value: model.orderedCosts.euroString, subtitle: "von \(project.budget.euroString) Budget", systemImage: "eurosign.circle", tint: project.budget > 0 && model.orderedCosts > project.budget ? BaumioTheme.danger : BaumioTheme.info)
+                    DashboardMetricCard(title: "Nächste Termine", value: "\(model.schedule.filter { $0.date >= Calendar.current.startOfDay(for: Date()) }.count)", subtitle: "heute und in der Zukunft", systemImage: "calendar", tint: BaumioTheme.accent)
                     DashboardMetricCard(title: "Offene Aufgaben", value: "\(model.openTasks.count)", subtitle: "aus deinen Daten", systemImage: "checklist", tint: BaumioTheme.success)
                     DashboardMetricCard(title: "Mängel", value: "\(model.openDefects.count)", subtitle: "aus deinen Daten", systemImage: "exclamationmark.triangle", tint: BaumioTheme.warning)
-                    DashboardMetricCard(title: "Heute fällig", value: "\(model.dueTodayCount)", subtitle: model.dueTodayCount == 0 ? "alles erledigt" : "Aufgaben & Mängel", systemImage: model.dueTodayCount == 0 ? "checkmark.circle" : "bell.badge", tint: model.dueTodayCount == 0 ? BaumioTheme.success : BaumioTheme.danger)
+                    DashboardMetricCard(title: "Fällig & überfällig", value: "\(model.dueTodayCount)", subtitle: model.dueTodayCount == 0 ? "alles erledigt" : "Aufgaben, Mängel & Rechnungen", systemImage: model.dueTodayCount == 0 ? "checkmark.circle" : "bell.badge", tint: model.dueTodayCount == 0 ? BaumioTheme.success : BaumioTheme.danger)
                     DashboardMetricCard(title: "Dokumente", value: "\(model.documents.count)", subtitle: "aus deinen Daten", systemImage: "doc.text", tint: BaumioTheme.secondaryText)
                 }
             } else {
@@ -1093,7 +1149,8 @@ struct ProjectsView: View {
                         }
                     }
                     .onTapGesture { model.selectProject(project) }
-                    .accessibilityLabel("Projekt \(project.name) auswählen")
+                    .accessibilityElement(children: .contain)
+                    .accessibilityAction(named: "Projekt \(project.name) auswählen") { model.selectProject(project) }
                 }
             }
         }
@@ -1168,6 +1225,8 @@ struct TradesView: View {
     }
 
     var body: some View {
+        // Favoriten nur einmal pro Rendering dekodieren (nicht pro Karte).
+        let favorites = favoriteFirms
         ListScreen(title: "Firmen", subtitle: "Handwerksbetriebe, Kontaktdaten und Kosten") {
             if !model.canCreateTrade {
                 Button { model.selectedSection = .pricing } label: {
@@ -1206,7 +1265,7 @@ struct TradesView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Kontakt aus Adressbuch importieren")
-                    if !favoriteFirms.isEmpty {
+                    if !favorites.isEmpty {
                         Button { showingFavorites = true } label: {
                             Label("Favoriten", systemImage: "star.fill")
                                 .font(.headline)
@@ -1264,7 +1323,13 @@ struct TradesView: View {
                 .buttonStyle(.plain)
             }
 
-            if !model.trades.isEmpty && filteredTrades.isEmpty {
+            if model.trades.isEmpty {
+                EmptyStateView(
+                    title: "Noch keine Firmen",
+                    message: "Lege Handwerksbetriebe an, um Kosten, Bewertungen und Kontaktdaten zuzuordnen.",
+                    systemImage: "person.2"
+                )
+            } else if filteredTrades.isEmpty {
                 ContentUnavailableView.search(text: searchText)
             }
             ForEach(filteredTrades) { trade in
@@ -1285,10 +1350,10 @@ struct TradesView: View {
                             Spacer()
                             Menu {
                                 Button("Bearbeiten") { editingItem = .trade(trade) }
-                                let isFav = favoriteFirms.contains { $0.company == trade.company && $0.name == trade.name }
+                                let isFav = favorites.contains { $0.company == trade.company && $0.name == trade.name }
                                 if isFav {
                                     Button("Aus Favoriten entfernen") {
-                                        if let fav = favoriteFirms.first(where: { $0.company == trade.company && $0.name == trade.name }) {
+                                        if let fav = favorites.first(where: { $0.company == trade.company && $0.name == trade.name }) {
                                             removeFavorite(fav)
                                         }
                                     }
@@ -1468,6 +1533,7 @@ struct FavoriteFirmsSheet: View {
                         }
                         .swipeActions(edge: .leading) {
                             Button {
+                                guard !isImporting else { return }
                                 guard model.canCreateTrade else {
                                     importError = "Free-Plan: maximal 5 Firmen. Upgrade auf Baumio Pro für unbegrenzte Firmen."
                                     return
@@ -1678,17 +1744,18 @@ struct ScheduleView: View {
             }
             let calendar = store.defaultCalendarForNewEvents
             var added = 0
+            var skipped = 0
+            // Mit Schreibzugriff können vorhandene Kalendereinträge nicht gelesen werden. Bereits exportierte Termine
+            // werden deshalb lokal gemerkt (Termin-ID + Datum), damit ein erneuter Export keine Duplikate erzeugt.
+            let exportedKey = "calendarExportedIDs"
+            var exported = UserDefaults.standard.dictionary(forKey: exportedKey) as? [String: String] ?? [:]
             for item in filteredSchedule {
-                let marker = "[baumio:\(item.id.uuidString)]"
-                let dayStart = Calendar.current.startOfDay(for: item.date)
-                let windowEnd = Calendar.current.date(byAdding: .day, value: 2, to: dayStart) ?? dayStart
-                let pred = store.predicateForEvents(withStart: dayStart, end: windowEnd, calendars: nil)
-                if store.events(matching: pred).contains(where: { ($0.notes ?? "").contains(marker) }) { continue }
+                let signature = "\(BaumioDateFormatter.string(from: item.date))|\(item.title)|\(item.durationDays)"
+                if exported[item.id.uuidString] == signature { skipped += 1; continue }
 
                 let event = EKEvent(eventStore: store)
                 event.title = item.title
-                let markerSuffix = item.notes.isEmpty ? marker : "\(item.notes)\n\(marker)"
-                event.notes = markerSuffix
+                event.notes = item.notes.isEmpty ? nil : item.notes
                 event.calendar = calendar
 
                 let isAllDay = item.startTime == nil
@@ -1704,7 +1771,7 @@ struct ScheduleView: View {
                 }
                 let endDate: Date
                 if isAllDay {
-                    endDate = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: item.date)) ?? startDate
+                    endDate = Calendar.current.date(byAdding: .day, value: max(item.durationDays, 1), to: Calendar.current.startOfDay(for: item.date)) ?? startDate
                 } else if let t = item.endTime {
                     endDate = Calendar.current.date(bySettingHour: Calendar.current.component(.hour, from: t),
                                                     minute: Calendar.current.component(.minute, from: t),
@@ -1715,9 +1782,12 @@ struct ScheduleView: View {
                 event.startDate = startDate
                 event.endDate = endDate
                 try store.save(event, span: .thisEvent)
+                exported[item.id.uuidString] = signature
                 added += 1
             }
+            UserDefaults.standard.set(exported, forKey: exportedKey)
             calendarMessage = "\(added) Termin\(added == 1 ? "" : "e") in den Kalender exportiert."
+                + (skipped > 0 ? " \(skipped) waren bereits exportiert." : "")
         } catch {
             calendarMessage = "Fehler: \(error.localizedDescription)"
         }
@@ -1730,12 +1800,18 @@ struct DiaryView: View {
     @State private var showingEditor = false
     @State private var editingItem: EditingItem?
     @State private var deletingEntry: DiaryEntry?
-    @State private var autoWeather = ""
-    @State private var autoTemperature = ""
 
     var body: some View {
         ListScreen(title: "Bautagebuch", subtitle: "Tägliche Einträge, Wetter, Firmen, Fotos und Notizen") {
             PrimaryButton(title: "Eintrag anlegen", systemImage: "plus", action: { showingEditor = true })
+
+            if model.diary.isEmpty {
+                EmptyStateView(
+                    title: "Noch keine Einträge",
+                    message: "Halte täglich fest, was auf der Baustelle passiert ist – mit Wetter, Firmen und Fotos.",
+                    systemImage: "book.pages"
+                )
+            }
 
             ForEach(model.diary) { entry in
                 BaumioCard {
@@ -1765,16 +1841,11 @@ struct DiaryView: View {
             }
         }
         .sheet(isPresented: $showingEditor) {
-            QuickAddView(kind: .diary, model: model, initialWeather: autoWeather, initialTemperature: autoTemperature)
+            // Das Wetter wird erst beim Öffnen des Formulars abgefragt (nicht schon beim Anzeigen der Liste).
+            QuickAddView(kind: .diary, model: model)
         }
         .sheet(item: $editingItem) { item in
             QuickAddView(editing: item, model: model)
-        }
-        .task {
-            if let result = await fetchCurrentWeather() {
-                autoWeather = result.weather
-                autoTemperature = result.temp
-            }
         }
         .alert("Eintrag löschen?", isPresented: Binding(get: { deletingEntry != nil }, set: { if !$0 { deletingEntry = nil } })) {
             Button("Abbrechen", role: .cancel) { deletingEntry = nil }
@@ -1795,14 +1866,29 @@ struct TasksView: View {
     @State private var searchText = ""
 
     private var filteredTasks: [TaskItem] {
-        guard !searchText.isEmpty else { return model.tasks }
-        let q = searchText.lowercased()
-        return model.tasks.filter { $0.title.lowercased().contains(q) || $0.trade.lowercased().contains(q) }
+        let base = searchText.isEmpty ? model.tasks : {
+            let q = searchText.lowercased()
+            return model.tasks.filter { $0.title.lowercased().contains(q) || $0.trade.lowercased().contains(q) }
+        }()
+        return base.sorted {
+            if $0.isDone != $1.isDone { return !$0.isDone }
+            return $0.dueDate < $1.dueDate
+        }
     }
 
     var body: some View {
         ListScreen(title: "Aufgaben", subtitle: "Prioritäten, Fälligkeiten und Filter") {
             PrimaryButton(title: "Aufgabe anlegen", systemImage: "plus", action: { showingEditor = true })
+
+            if model.tasks.isEmpty {
+                EmptyStateView(
+                    title: "Keine Aufgaben",
+                    message: "Lege Aufgaben mit Priorität und Fälligkeit an, damit auf der Baustelle nichts untergeht.",
+                    systemImage: "checklist"
+                )
+            } else if filteredTasks.isEmpty {
+                ContentUnavailableView.search(text: searchText)
+            }
 
             ForEach(filteredTasks) { task in
                 BaumioCard {
@@ -1822,7 +1908,7 @@ struct TasksView: View {
                                 Text(task.title).font(.headline).foregroundStyle(BaumioTheme.primaryText)
                                 Text("\(task.trade) · fällig am \(task.dueDate.formatted(date: .abbreviated, time: .omitted))")
                                     .font(.footnote)
-                                    .foregroundStyle(BaumioTheme.secondaryText)
+                                    .foregroundStyle(!task.isDone && task.dueDate < Date() ? BaumioTheme.danger : BaumioTheme.secondaryText)
                                 StatusBadge(title: task.priority.rawValue, color: priorityColor(task.priority))
                             }
                             Spacer()
@@ -1901,6 +1987,14 @@ struct MaterialsView: View {
     var body: some View {
         ListScreen(title: "Materialliste", subtitle: "Mengen, Einheiten, Preise und Lieferstatus") {
             PrimaryButton(title: "Material anlegen", systemImage: "plus", action: { showingEditor = true })
+
+            if model.materials.isEmpty {
+                EmptyStateView(
+                    title: "Keine Materialien",
+                    message: "Erfasse Material mit Menge, Preis und Lieferstatus – die Summen fließen in die Kostenübersicht ein.",
+                    systemImage: "shippingbox"
+                )
+            }
 
             BaumioCard {
                 VStack(alignment: .leading, spacing: 12) {
@@ -2012,6 +2106,7 @@ struct TimeLogsView: View {
     @State private var showingTimerSheet = false
     @State private var timerElapsedMinutes = 0
     @State private var csvTimeSheet: ShareableURL?
+    @State private var deletingLog: TimeLogItem?
 
     private var isTimerRunning: Bool { timerStartTimestamp > 0 }
 
@@ -2099,7 +2194,7 @@ struct TimeLogsView: View {
                                 Menu {
                                     Button("Bearbeiten") { editingItem = .timeLog(log) }
                                     Button("Löschen", role: .destructive) {
-                                        model.handle { try await model.deleteTimeLog(log) }
+                                        deletingLog = log
                                     }
                                 } label: {
                                     Image(systemName: "ellipsis.circle").foregroundStyle(BaumioTheme.secondaryText).font(.title3).frame(width: 44, height: 44)
@@ -2127,6 +2222,9 @@ struct TimeLogsView: View {
         }
         .sheet(item: $csvTimeSheet) { shareable in
             ShareSheet(items: [shareable.url])
+        }
+        .deleteConfirmation("Zeiteintrag löschen?", item: $deletingLog, message: { "\($0.title) wird unwiderruflich gelöscht." }) { log in
+            model.handle { try await model.deleteTimeLog(log) }
         }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -2214,8 +2312,10 @@ struct HandoverProtocolSignatureView: View {
     @Bindable var model: BaumioAppViewModel
     @Binding var isPresented: Bool
     @State private var step = 0
-    @State private var canvas1 = PKDrawing()
-    @State private var canvas2 = PKDrawing()
+    @State private var canvas1 = SignatureDrawing()
+    @State private var canvas2 = SignatureDrawing()
+    @State private var name1 = ""
+    @State private var name2 = ""
     @State private var isSaving = false
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
@@ -2233,9 +2333,11 @@ struct HandoverProtocolSignatureView: View {
                 if step == 0 {
                     signaturePage(
                         title: "Bauherr unterschreiben",
-                        subtitle: "Bitte mit dem Finger oder Apple Pencil unterschreiben",
+                        subtitle: "Bitte mit dem Finger oder Apple Pencil unterschreiben – das Datum wird automatisch ergänzt",
                         icon: "person.fill",
                         canvas: $canvas1,
+                        name: $name1,
+                        namePlaceholder: "Name Bauherr",
                         action: { withAnimation { step = 1 } },
                         actionLabel: "Weiter →"
                     )
@@ -2245,6 +2347,8 @@ struct HandoverProtocolSignatureView: View {
                         subtitle: "Zweite Partei bestätigt die Abnahme",
                         icon: "hammer.fill",
                         canvas: $canvas2,
+                        name: $name2,
+                        namePlaceholder: "Name Handwerker / Bauleiter",
                         action: finalize,
                         actionLabel: isSaving ? "Wird gespeichert …" : "Abnahme abschließen"
                     )
@@ -2261,10 +2365,11 @@ struct HandoverProtocolSignatureView: View {
             }
             .background(BaumioTheme.background)
         }
-        .preferredColorScheme(.dark)
+        .appAppearance()
+        .interactiveDismissDisabled()
     }
 
-    private func signaturePage(title: String, subtitle: String, icon: String, canvas: Binding<PKDrawing>, action: @escaping () -> Void, actionLabel: String) -> some View {
+    private func signaturePage(title: String, subtitle: String, icon: String, canvas: Binding<SignatureDrawing>, name: Binding<String>, namePlaceholder: String, action: @escaping () -> Void, actionLabel: String) -> some View {
         VStack(spacing: 16) {
             VStack(spacing: 6) {
                 Image(systemName: icon)
@@ -2275,8 +2380,12 @@ struct HandoverProtocolSignatureView: View {
             }
             .padding(.top, 24)
 
+            TextField(namePlaceholder, text: name)
+                .textContentType(.name)
+                .textFieldStyle(.roundedBorder)
+
             BaumioCard {
-                PKCanvasRepresentable(drawing: canvas, tool: PKInkingTool(.pen, color: .black, width: 2))
+                SignaturePad(drawing: canvas)
                     .frame(height: canvasHeight)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                     .overlay(
@@ -2287,7 +2396,7 @@ struct HandoverProtocolSignatureView: View {
 
             HStack(spacing: 12) {
                 SecondaryButton(title: "Löschen", systemImage: "eraser") {
-                    canvas.wrappedValue = PKDrawing()
+                    canvas.wrappedValue = SignatureDrawing()
                 }
                 PrimaryButton(title: actionLabel, systemImage: "checkmark.circle.fill", action: action)
                     .disabled(canvas.wrappedValue.strokes.isEmpty || isSaving)
@@ -2300,12 +2409,13 @@ struct HandoverProtocolSignatureView: View {
     private func finalize() {
         isSaving = true
         Task {
-            let renderer1 = PKCanvasView()
-            renderer1.drawing = canvas1
-            let sig1 = renderer1.drawing.image(from: renderer1.drawing.bounds.isEmpty ? CGRect(x: 0, y: 0, width: 300, height: 200) : renderer1.drawing.bounds, scale: 2).pngData() ?? Data()
-            let renderer2 = PKCanvasView()
-            renderer2.drawing = canvas2
-            let sig2 = renderer2.drawing.image(from: renderer2.drawing.bounds.isEmpty ? CGRect(x: 0, y: 0, width: 300, height: 200) : renderer2.drawing.bounds, scale: 2).pngData() ?? Data()
+            // Unterschriften als schwarze Tinte auf weißem Grund rendern – unabhängig vom Dark Mode.
+            let signedAt = Date()
+            guard let sig1 = signaturePNG(from: canvas1, name: name1, date: signedAt), let sig2 = signaturePNG(from: canvas2, name: name2, date: signedAt) else {
+                model.actionError = "Die Unterschrift konnte nicht gespeichert werden."
+                isSaving = false
+                return
+            }
             do {
                 try await model.finalizeAbnahme(trade: trade, sig1Data: sig1, sig2Data: sig2)
                 isPresented = false
@@ -2327,6 +2437,10 @@ struct HandoverView: View {
     @State private var signingItem: HandoverItem?
     @State private var signingTrade = ""
     @State private var showingProtocolSignature = false
+    @State private var resettingAbnahme: AbnahmeRecord?
+    @State private var deletingHandoverItem: HandoverItem?
+    @State private var openItemsWarning: (trade: String, count: Int)?
+    @State private var isExportingPDF = false
 
     private var groupedByTrade: [(trade: String, items: [HandoverItem])] {
         let groups = Dictionary(grouping: model.handoverItems) { $0.tradeType.isEmpty ? "Allgemein" : $0.tradeType }
@@ -2349,13 +2463,10 @@ struct HandoverView: View {
             SecondaryButton(title: "Vorlage laden / importieren", systemImage: "list.bullet.clipboard") { showingTemplates = true }
 
             if model.isPro {
-                SecondaryButton(title: "Protokoll als PDF exportieren", systemImage: "square.and.arrow.up") {
-                    if let url = PDFExporter.export(
-                        HandoverPDFPage(items: model.handoverItems, projectName: model.selectedProject?.name ?? "Projekt", exportDate: Date(), project: model.selectedProject),
-                        fileName: "Abnahmeprotokoll.pdf"
-                    ) { exportSheet = ShareableURL(url: url) }
+                SecondaryButton(title: isExportingPDF ? "Wird erstellt …" : "Protokoll als PDF exportieren", systemImage: "square.and.arrow.up") {
+                    Task { await exportProtocolPDF() }
                 }
-                .disabled(model.handoverItems.isEmpty)
+                .disabled(model.handoverItems.isEmpty || isExportingPDF)
                 SecondaryButton(title: "Checkliste als JSON exportieren", systemImage: "square.and.arrow.up.on.square") {
                     if let url = exportChecklistAsJSON() { jsonExportSheet = ShareableURL(url: url) }
                 }
@@ -2418,7 +2529,7 @@ struct HandoverView: View {
                                     }
                                     Spacer()
                                     Button(role: .destructive) {
-                                        model.handle { try await model.deleteAbnahme(abnahme) }
+                                        resettingAbnahme = abnahme
                                     } label: {
                                         Label("Zurücksetzen", systemImage: "arrow.uturn.backward")
                                             .font(.caption)
@@ -2479,7 +2590,7 @@ struct HandoverView: View {
                                             }
                                             Divider()
                                             Button("Löschen", role: .destructive) {
-                                                model.handle { try await model.deleteHandoverItem(entry) }
+                                                deletingHandoverItem = entry
                                             }
                                         } label: {
                                             Image(systemName: "ellipsis.circle")
@@ -2493,8 +2604,13 @@ struct HandoverView: View {
                             if !isLocked {
                                 Divider()
                                 Button {
-                                    signingTrade = group.trade
-                                    showingProtocolSignature = true
+                                    let open = group.items.filter { !$0.isDone && $0.status != .vorbehalt }.count
+                                    if open > 0 {
+                                        openItemsWarning = (group.trade, open)
+                                    } else {
+                                        signingTrade = group.trade
+                                        showingProtocolSignature = true
+                                    }
                                 } label: {
                                     Label("Abnahme für \(group.trade) unterzeichnen", systemImage: "signature")
                                         .font(.subheadline.bold())
@@ -2530,6 +2646,62 @@ struct HandoverView: View {
         .sheet(isPresented: $showingProtocolSignature) {
             HandoverProtocolSignatureView(trade: signingTrade, model: model, isPresented: $showingProtocolSignature)
         }
+        .deleteConfirmation("Abnahme zurücksetzen?", item: $resettingAbnahme, message: {
+            "Die Unterschriften der Abnahme „\($0.trade)“ werden gelöscht und die Prüfpunkte wieder freigegeben."
+        }) { abnahme in
+            model.handle { try await model.deleteAbnahme(abnahme) }
+        }
+        .deleteConfirmation("Prüfpunkt löschen?", item: $deletingHandoverItem, message: { "\($0.item) wird unwiderruflich gelöscht." }) { entry in
+            model.handle { try await model.deleteHandoverItem(entry) }
+        }
+        .alert("Offene Prüfpunkte", isPresented: Binding(get: { openItemsWarning != nil }, set: { if !$0 { openItemsWarning = nil } })) {
+            Button("Abbrechen", role: .cancel) { openItemsWarning = nil }
+            Button("Trotzdem unterzeichnen") {
+                if let warning = openItemsWarning {
+                    signingTrade = warning.trade
+                    showingProtocolSignature = true
+                }
+                openItemsWarning = nil
+            }
+        } message: {
+            if let warning = openItemsWarning {
+                Text("Bei „\(warning.trade)“ sind noch \(warning.count) Prüfpunkt\(warning.count == 1 ? "" : "e") offen. Nach der Unterschrift sind alle Punkte dieses Gewerks gesperrt.")
+            }
+        }
+    }
+
+    /// Erstellt das Abnahmeprotokoll inklusive der gespeicherten digitalen Unterschriften.
+    private func exportProtocolPDF() async {
+        isExportingPDF = true
+        defer { isExportingPDF = false }
+        var signatures: [HandoverPDFSignature] = []
+        for abnahme in model.abnahmen where abnahme.isSigned {
+            signatures.append(HandoverPDFSignature(
+                trade: abnahme.trade,
+                signedAt: abnahme.signedAt,
+                sig1: await loadSignatureImage(abnahme.sig1Path),
+                sig2: await loadSignatureImage(abnahme.sig2Path)
+            ))
+        }
+        let page = HandoverPDFPage(
+            items: model.handoverItems,
+            projectName: model.selectedProject?.name ?? "Projekt",
+            exportDate: Date(),
+            project: model.selectedProject,
+            signatures: signatures
+        )
+        if let url = PDFExporter.export(page, fileName: "Abnahmeprotokoll.pdf") {
+            exportSheet = ShareableURL(url: url)
+        } else {
+            model.actionError = "Das PDF konnte nicht erstellt werden."
+        }
+    }
+
+    private func loadSignatureImage(_ path: String?) async -> UIImage? {
+        guard let path,
+              let url = try? await model.photoURL(bucket: "signatures", path: path),
+              let (data, _) = try? await URLSession.shared.data(from: url) else { return nil }
+        return UIImage(data: data)
     }
 
     private func exportChecklistAsJSON() -> URL? {
@@ -2723,6 +2895,7 @@ struct DocumentsView: View {
     @State private var isBusy = false
     @State private var message: String?
     @State private var isError = false
+    @State private var deletingDocument: DocumentItem?
 
     private let docTypes: [(value: String, label: String)] = [
         ("vertrag", "Vertrag"), ("angebot", "Angebot"), ("rechnung", "Rechnung"),
@@ -2788,6 +2961,9 @@ struct DocumentsView: View {
         .onChange(of: photoItem) { _, newItem in
             guard let newItem else { return }
             handlePhotoSelection(newItem)
+        }
+        .deleteConfirmation("Dokument löschen?", item: $deletingDocument, message: { "\($0.title) wird unwiderruflich gelöscht." }) { document in
+            model.handle { try await model.deleteDocument(document) }
         }
     }
 
@@ -2867,7 +3043,7 @@ struct DocumentsView: View {
             .buttonStyle(.plain)
             Spacer()
             Button(role: .destructive) {
-                model.handle { try await model.deleteDocument(document) }
+                deletingDocument = document
             } label: {
                 Image(systemName: "trash").foregroundStyle(BaumioTheme.danger).frame(width: 44, height: 44)
             }
@@ -2918,7 +3094,8 @@ struct DocumentsView: View {
                 let scoped = url.startAccessingSecurityScopedResource()
                 defer { if scoped { url.stopAccessingSecurityScopedResource() } }
                 do {
-                    var data = try Data(contentsOf: url)
+                    // Datei abseits des Main-Threads lesen, damit die Oberfläche bei großen Dateien nicht einfriert.
+                    var data = try await Task.detached(priority: .userInitiated) { try Data(contentsOf: url) }.value
                     let ext = url.pathExtension.lowercased()
                     var contentType = UTType(filenameExtension: ext)?.preferredMIMEType ?? "application/octet-stream"
                     if UTType(filenameExtension: ext)?.conforms(to: .image) == true, let c = ImageCompression.compressedJPEG(from: data) {
@@ -2969,14 +3146,27 @@ struct CostsView: View {
     @State private var csvExportSheet: ShareableURL?
 
     private var filteredCosts: [CostItem] {
-        guard !searchText.isEmpty else { return model.costs }
-        let q = searchText.lowercased()
-        return model.costs.filter {
-            $0.title.lowercased().contains(q) ||
-            $0.category.lowercased().contains(q) ||
-            $0.trade.lowercased().contains(q) ||
-            $0.supplier.lowercased().contains(q) ||
-            $0.invoiceReference.lowercased().contains(q)
+        let base = searchText.isEmpty ? model.costs : {
+            let q = searchText.lowercased()
+            return model.costs.filter {
+                $0.title.lowercased().contains(q) ||
+                $0.category.lowercased().contains(q) ||
+                $0.trade.lowercased().contains(q) ||
+                $0.supplier.lowercased().contains(q) ||
+                $0.invoiceReference.lowercased().contains(q)
+            }
+        }()
+        let now = Date()
+        return base.sorted {
+            let aOverdue = $0.dueDate.map { $0 < now } ?? false && !["bezahlt", "storniert"].contains($0.status.lowercased())
+            let bOverdue = $1.dueDate.map { $0 < now } ?? false && !["bezahlt", "storniert"].contains($1.status.lowercased())
+            if aOverdue != bOverdue { return aOverdue }
+            switch ($0.dueDate, $1.dueDate) {
+            case (let a?, let b?): return a < b
+            case (nil, _?): return false
+            case (_?, nil): return true
+            case (nil, nil): return false
+            }
         }
     }
 
@@ -3067,11 +3257,16 @@ struct CostsView: View {
                 }
                 ForEach(filteredCosts) { cost in
                     let overBudget = cost.paid > cost.planned && cost.planned > 0
+                    let isOverdue = cost.dueDate.map { $0 < Date() } ?? false
+                        && !["bezahlt", "storniert"].contains(cost.status.lowercased())
                     BaumioCard {
                         VStack(alignment: .leading, spacing: 8) {
                             HStack(alignment: .top) {
-                                ItemLine(icon: "eurosign.circle", title: cost.title, subtitle: "\(cost.category) · \(cost.trade)", tint: overBudget ? BaumioTheme.danger : BaumioTheme.accent)
+                                ItemLine(icon: "eurosign.circle", title: cost.title, subtitle: [cost.category, cost.trade].filter { !$0.isEmpty }.joined(separator: " · "), tint: overBudget ? BaumioTheme.danger : BaumioTheme.accent)
                                 Spacer()
+                                if isOverdue {
+                                    StatusBadge(title: "Überfällig", color: BaumioTheme.danger)
+                                }
                                 if overBudget {
                                     StatusBadge(title: "Überschritten", color: BaumioTheme.danger)
                                 }
@@ -3110,6 +3305,11 @@ struct CostsView: View {
                             if !cost.invoiceReference.isEmpty {
                                 Text("Rechnung: \(cost.invoiceReference)").font(.footnote).foregroundStyle(BaumioTheme.secondaryText)
                             }
+                            if let due = cost.dueDate {
+                                Label("Fällig: \(due.formatted(date: .abbreviated, time: .omitted))", systemImage: "calendar.badge.exclamationmark")
+                                    .font(.footnote)
+                                    .foregroundStyle(isOverdue ? BaumioTheme.danger : BaumioTheme.secondaryText)
+                            }
                             if cost.isInvoice {
                                 HStack(spacing: 8) {
                                     if cost.laborAmount > 0 {
@@ -3131,9 +3331,9 @@ struct CostsView: View {
                         }
                     }
                     .overlay(alignment: .leading) {
-                        if overBudget {
+                        if overBudget || isOverdue {
                             RoundedRectangle(cornerRadius: 12)
-                                .fill(BaumioTheme.danger)
+                                .fill(isOverdue && !overBudget ? BaumioTheme.warning : BaumioTheme.danger)
                                 .frame(width: 3)
                                 .padding(.vertical, 4)
                         }
@@ -3236,6 +3436,7 @@ struct OffersView: View {
     @State private var showingEditor = false
     @State private var editingItem: EditingItem?
     @State private var showingScanner = false
+    @State private var deletingOffer: OfferItem?
 
     private var groupedOffers: [(scope: String, offers: [OfferItem])] {
         var groups: [(scope: String, offers: [OfferItem])] = []
@@ -3310,7 +3511,7 @@ struct OffersView: View {
                                 Menu {
                                     Button("Bearbeiten") { editingItem = .offer(offer) }
                                     Button("Löschen", role: .destructive) {
-                                        model.handle { try await model.deleteOffer(offer) }
+                                        deletingOffer = offer
                                     }
                                 } label: {
                                     Image(systemName: "ellipsis.circle").foregroundStyle(BaumioTheme.secondaryText).font(.title3).frame(width: 44, height: 44)
@@ -3321,7 +3522,7 @@ struct OffersView: View {
                                     Button("Angenommen") { model.handle { try await model.updateOfferStatus(offer, status: "Angenommen") } }
                                     Button("Abgelehnt") { model.handle { try await model.updateOfferStatus(offer, status: "Abgelehnt") } }
                                 } label: {
-                                    StatusBadge(title: offer.status, color: offer.status == "Angenommen" ? BaumioTheme.success : BaumioTheme.secondaryText)
+                                    StatusBadge(title: offer.status, color: offer.status == "Angenommen" ? BaumioTheme.success : offer.status == "Abgelehnt" ? BaumioTheme.danger : BaumioTheme.secondaryText)
                                 }
                                 .accessibilityLabel("Angebotsstatus ändern")
                             }
@@ -3343,6 +3544,9 @@ struct OffersView: View {
         }
         .sheet(isPresented: $showingScanner) {
             DocumentScannerSheet(docType: .angebot, model: model)
+        }
+        .deleteConfirmation("Angebot löschen?", item: $deletingOffer, message: { "Das Angebot von \($0.provider) wird unwiderruflich gelöscht." }) { offer in
+            model.handle { try await model.deleteOffer(offer) }
         }
     }
 }
@@ -3433,7 +3637,7 @@ struct VisitenkarteScannerSheet: View {
                     Button { showingCamera = true } label: {
                         Label("Kamera", systemImage: "camera")
                             .frame(maxWidth: .infinity).padding()
-                            .background(BaumioTheme.accent).foregroundStyle(.white)
+                            .background(BaumioTheme.accent).foregroundStyle(.black)
                             .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
                     .padding(.horizontal)
@@ -3517,7 +3721,9 @@ struct VisitenkarteScannerSheet: View {
     private func processImageData(_ data: Data, mimeType: String) async {
         step = .scanning
         do {
-            let result = try await model.scanVisitenkarte(imageData: data, mimeType: mimeType)
+            // Wie beim Dokumenten-Scan verkleinern und nach JPEG wandeln (HEIC/Originalgröße würde abgelehnt).
+            let compressed = ImageCompression.compressedJPEG(from: data) ?? data
+            let result = try await model.scanVisitenkarte(imageData: compressed, mimeType: "image/jpeg")
             vName = result.name
             vCompany = result.company
             vTradeType = result.tradeType
@@ -3622,13 +3828,16 @@ struct DocumentScannerSheet: View {
         }
         .fileImporter(isPresented: $showingFilePicker, allowedContentTypes: [.pdf], allowsMultipleSelection: false) { result in
             guard case .success(let urls) = result, let url = urls.first else { return }
-            let scoped = url.startAccessingSecurityScopedResource()
-            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-            guard let data = try? Data(contentsOf: url) else {
-                errorMessage = "PDF konnte nicht gelesen werden."
-                return
+            Task {
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                // Datei abseits des Main-Threads lesen.
+                guard let data = try? await Task.detached(priority: .userInitiated, operation: { try Data(contentsOf: url) }).value else {
+                    errorMessage = "PDF konnte nicht gelesen werden."
+                    return
+                }
+                await processImageData(data, mimeType: "application/pdf")
             }
-            Task { await processImageData(data, mimeType: "application/pdf") }
         }
     }
 
@@ -3674,7 +3883,7 @@ struct DocumentScannerSheet: View {
                             .frame(maxWidth: .infinity)
                             .padding()
                             .background(BaumioTheme.accent)
-                            .foregroundStyle(.white)
+                            .foregroundStyle(.black)
                             .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
                     .padding(.horizontal)
@@ -3820,6 +4029,12 @@ struct DocumentScannerSheet: View {
         let isImage = mimeType.hasPrefix("image/")
         let finalData = isImage ? (ImageCompression.compressedJPEG(from: data) ?? data) : data
         let finalMime = isImage ? "image/jpeg" : mimeType
+        // Der Server akzeptiert maximal 4 MB (Base64 vergrößert um ca. ein Drittel) – früh und verständlich abbrechen.
+        if finalData.count > 3_000_000 {
+            errorMessage = "Die Datei ist zu groß (max. ca. 3 MB). Bitte ein kleineres Foto oder PDF wählen."
+            step = .picking
+            return
+        }
         do {
             switch docType {
             case .rechnung:
@@ -3871,7 +4086,8 @@ struct DocumentScannerSheet: View {
                 try await model.createCost(
                     title: rFirma.isEmpty ? "Rechnung" : rFirma,
                     amount: betrag,
-                    category: rGewerk.isEmpty ? "sonstiges" : "lohn",
+                    // Nur mit erfassten Arbeits-/Fahrtkosten als Lohn werten – sonst würde der ganze Betrag (inkl. Material) als §35a-relevant gelten.
+                    category: (labor > 0 || fahrt > 0) ? "lohn" : "sonstiges",
                     status: rStatus,
                     invoiceReference: rNummer,
                     notes: rNotes,
@@ -3883,7 +4099,11 @@ struct DocumentScannerSheet: View {
                 if saveAsDocument, let data = scannedImageData {
                     let ext = scannedMimeType.contains("pdf") ? "pdf" : "jpg"
                     let docName = rFirma.isEmpty ? "Rechnung" : "Rechnung \(rFirma)"
-                    try? await model.uploadDocument(name: docName, docType: "rechnung", data: data, contentType: scannedMimeType, fileExtension: ext)
+                    do {
+                        try await model.uploadDocument(name: docName, docType: "rechnung", data: data, contentType: scannedMimeType, fileExtension: ext)
+                    } catch {
+                        model.actionError = "Die Rechnung wurde gespeichert, der Scan konnte aber nicht abgelegt werden: \(error.localizedDescription)"
+                    }
                 }
             } else {
                 let betrag = Decimal(string: aBetrag.replacingOccurrences(of: ",", with: ".")) ?? 0
@@ -3899,7 +4119,11 @@ struct DocumentScannerSheet: View {
                 if saveAsDocument, let data = scannedImageData {
                     let ext = scannedMimeType.contains("pdf") ? "pdf" : "jpg"
                     let docName = aFirma.isEmpty ? "Angebot" : "Angebot \(aFirma)"
-                    try? await model.uploadDocument(name: docName, docType: "angebot", data: data, contentType: scannedMimeType, fileExtension: ext)
+                    do {
+                        try await model.uploadDocument(name: docName, docType: "angebot", data: data, contentType: scannedMimeType, fileExtension: ext)
+                    } catch {
+                        model.actionError = "Das Angebot wurde gespeichert, der Scan konnte aber nicht abgelegt werden: \(error.localizedDescription)"
+                    }
                 }
             }
             dismiss()
@@ -3914,6 +4138,7 @@ struct OfferComparisonCard: View {
     let offers: [OfferItem]
     @Bindable var model: BaumioAppViewModel
     let onEdit: (OfferItem) -> Void
+    @State private var deletingOffer: OfferItem?
 
     private var cheapest: OfferItem? { offers.min(by: { $0.amount < $1.amount }) }
     private var mostExpensive: OfferItem? { offers.max(by: { $0.amount < $1.amount }) }
@@ -4007,7 +4232,7 @@ struct OfferComparisonCard: View {
                             Button("Erhalten") { model.handle { try await model.updateOfferStatus(offer, status: "Erhalten") } }
                             Button("Annehmen") { model.handle { try await model.updateOfferStatus(offer, status: "Angenommen") } }
                             Button("Ablehnen") { model.handle { try await model.updateOfferStatus(offer, status: "Abgelehnt") } }
-                            Button("Löschen", role: .destructive) { model.handle { try await model.deleteOffer(offer) } }
+                            Button("Löschen", role: .destructive) { deletingOffer = offer }
                         } label: {
                             Image(systemName: "ellipsis.circle").foregroundStyle(BaumioTheme.secondaryText)
                         }
@@ -4024,6 +4249,9 @@ struct OfferComparisonCard: View {
                     }
                 }
             }
+        }
+        .deleteConfirmation("Angebot löschen?", item: $deletingOffer, message: { "Das Angebot von \($0.provider) wird unwiderruflich gelöscht." }) { offer in
+            model.handle { try await model.deleteOffer(offer) }
         }
     }
 }
@@ -4063,11 +4291,23 @@ struct RemoteThumbnail: View {
         }
         .frame(width: 64, height: 64)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .task {
-            do { url = try await model.photoURL(bucket: bucket, path: path) }
-            catch { failed = true }
+        .task(id: path) {
+            // Signierte URLs sind eine Stunde gültig – für die Anzeige nicht bei jedem Erscheinen neu anfordern.
+            if let cached = Self.urlCache[path], cached.expires > Date() {
+                url = cached.url
+                return
+            }
+            do {
+                let signed = try await model.photoURL(bucket: bucket, path: path)
+                Self.urlCache[path] = (signed, Date().addingTimeInterval(50 * 60))
+                url = signed
+            } catch {
+                failed = true
+            }
         }
     }
+
+    @MainActor private static var urlCache: [String: (url: URL, expires: Date)] = [:]
 }
 
 /// Titelbild eines Projekts aus lokalem FileManager-Cache.
@@ -4101,59 +4341,155 @@ struct ProjectCoverImage: View {
 }
 
 /// Foto-Streifen mit Hinzufügen-Button (komprimiert vor dem Upload).
-// MARK: - PencilKit canvas for digital signature
-private struct PKCanvasRepresentable: UIViewRepresentable {
-    @Binding var drawing: PKDrawing
-    var tool: PKInkingTool = PKInkingTool(.pen, color: .black, width: 2)
+// MARK: - Signature pad (Finger, Apple Pencil, Maus)
+/// Unterschrift als Liste von Linienzügen in Pad-Koordinaten.
+struct SignatureDrawing: Equatable {
+    var strokes: [[CGPoint]] = []
 
-    func makeUIView(context: Context) -> PKCanvasView {
-        let canvas = PKCanvasView()
-        canvas.drawing = drawing
-        canvas.drawingPolicy = .anyInput
-        canvas.tool = tool
-        canvas.backgroundColor = .white
-        canvas.delegate = context.coordinator
-        return canvas
-    }
-
-    func updateUIView(_ uiView: PKCanvasView, context: Context) {}
-
-    func makeCoordinator() -> Coordinator { Coordinator(self) }
-
-    final class Coordinator: NSObject, PKCanvasViewDelegate {
-        var parent: PKCanvasRepresentable
-        init(_ parent: PKCanvasRepresentable) { self.parent = parent }
-        func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
-            parent.drawing = canvasView.drawing
+    var bounds: CGRect {
+        let points = strokes.flatMap { $0 }
+        guard let first = points.first else { return .zero }
+        var minX = first.x, maxX = first.x, minY = first.y, maxY = first.y
+        for point in points {
+            minX = min(minX, point.x); maxX = max(maxX, point.x)
+            minY = min(minY, point.y); maxY = max(maxY, point.y)
         }
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
     }
+
+    fileprivate func path(offsetBy offset: CGPoint = .zero) -> Path {
+        var path = Path()
+        for stroke in strokes {
+            guard let first = stroke.first else { continue }
+            let start = CGPoint(x: first.x + offset.x, y: first.y + offset.y)
+            path.move(to: start)
+            if stroke.count == 1 {
+                // Einzelner Punkt → kleiner Punkt zeichnen.
+                path.addLine(to: CGPoint(x: start.x + 0.1, y: start.y))
+            }
+            for point in stroke.dropFirst() {
+                path.addLine(to: CGPoint(x: point.x + offset.x, y: point.y + offset.y))
+            }
+        }
+        return path
+    }
+}
+
+/// Reines SwiftUI-Unterschriftenfeld. Funktioniert zuverlässig mit dem Finger auf dem iPhone
+/// (PKCanvasView reagierte in Sheets nicht zuverlässig auf Fingereingaben).
+private struct SignaturePad: View {
+    @Binding var drawing: SignatureDrawing
+
+    var body: some View {
+        Canvas { context, _ in
+            context.stroke(
+                drawing.path(),
+                with: .color(.black),
+                style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round)
+            )
+        }
+        .background(Color.white)
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 0, coordinateSpace: .local)
+                .onChanged { value in
+                    if value.translation == .zero || drawing.strokes.isEmpty || !isDrawingStroke {
+                        drawing.strokes.append([value.location])
+                        isDrawingStroke = true
+                    } else {
+                        drawing.strokes[drawing.strokes.count - 1].append(value.location)
+                    }
+                }
+                .onEnded { _ in isDrawingStroke = false }
+        )
+        .overlay(alignment: .bottomLeading) {
+            if drawing.strokes.isEmpty {
+                Text("Hier unterschreiben")
+                    .font(.footnote)
+                    .foregroundStyle(Color.gray.opacity(0.6))
+                    .padding(10)
+                    .allowsHitTesting(false)
+            }
+        }
+        .environment(\.colorScheme, .light)
+    }
+
+    @State private var isDrawingStroke = false
+}
+
+/// Rendert eine Unterschrift als PNG: schwarze Tinte auf weißem Hintergrund mit etwas Rand.
+/// Unter der Unterschrift stehen Name (optional) und Datum/Uhrzeit der Unterschrift.
+private func signaturePNG(from drawing: SignatureDrawing, name: String = "", date: Date = Date()) -> Data? {
+    guard !drawing.strokes.isEmpty else { return nil }
+    let ink = drawing.bounds.insetBy(dx: -12, dy: -12)
+    guard ink.width > 0, ink.height > 0 else { return nil }
+
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "de_DE")
+    formatter.dateFormat = "dd.MM.yyyy, HH:mm 'Uhr'"
+    let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    let caption = trimmedName.isEmpty ? formatter.string(from: date) : "\(trimmedName) · \(formatter.string(from: date))"
+    let attributes: [NSAttributedString.Key: Any] = [
+        .font: UIFont.systemFont(ofSize: 11, weight: .medium),
+        .foregroundColor: UIColor.darkGray
+    ]
+    let captionSize = (caption as NSString).size(withAttributes: attributes)
+    let captionHeight = captionSize.height + 8
+
+    let size = CGSize(width: max(ink.width, captionSize.width + 16), height: ink.height + captionHeight)
+    let inkOrigin = CGPoint(x: (size.width - ink.width) / 2, y: 0)
+    let offset = CGPoint(x: inkOrigin.x - ink.minX, y: inkOrigin.y - ink.minY)
+
+    let format = UIGraphicsImageRendererFormat()
+    format.scale = 2
+    let image = UIGraphicsImageRenderer(size: size, format: format).image { context in
+        UIColor.white.setFill()
+        context.fill(CGRect(origin: .zero, size: size))
+        let cg = context.cgContext
+        cg.setStrokeColor(UIColor.black.cgColor)
+        cg.setLineWidth(2.5)
+        cg.setLineCap(.round)
+        cg.setLineJoin(.round)
+        cg.addPath(drawing.path(offsetBy: offset).cgPath)
+        cg.strokePath()
+        (caption as NSString).draw(
+            at: CGPoint(x: (size.width - captionSize.width) / 2, y: ink.height + 2),
+            withAttributes: attributes
+        )
+    }
+    return image.pngData()
 }
 
 private struct SignatureCaptureView: View {
     let item: HandoverItem
     @Bindable var model: BaumioAppViewModel
     @Environment(\.dismiss) private var dismiss
-    @State private var drawing = PKDrawing()
+    @State private var drawing = SignatureDrawing()
+    @State private var signerName = ""
     @State private var isSaving = false
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 16) {
-                Text("Tippe oder zeichne deine Unterschrift im weißen Feld.")
+                Text("Zeichne deine Unterschrift mit dem Finger im weißen Feld. Das Datum wird automatisch ergänzt.")
                     .font(.subheadline)
                     .foregroundStyle(BaumioTheme.secondaryText)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal)
 
-                PKCanvasRepresentable(drawing: $drawing)
+                TextField("Name des Unterzeichners", text: $signerName)
+                    .textContentType(.name)
+                    .textFieldStyle(.roundedBorder)
+                    .padding(.horizontal)
+
+                SignaturePad(drawing: $drawing)
                     .frame(maxWidth: .infinity)
                     .frame(height: 200)
-                    .background(Color.white)
                     .clipShape(RoundedRectangle(cornerRadius: 12))
                     .overlay(RoundedRectangle(cornerRadius: 12).stroke(BaumioTheme.secondaryText.opacity(0.3), lineWidth: 1))
                     .padding(.horizontal)
 
-                Button("Löschen") { drawing = PKDrawing() }
+                Button("Löschen") { drawing = SignatureDrawing() }
                     .foregroundStyle(BaumioTheme.danger)
 
                 Spacer()
@@ -4173,9 +4509,7 @@ private struct SignatureCaptureView: View {
                             guard !drawing.strokes.isEmpty else { return }
                             isSaving = true
                             Task {
-                                let rect = CGRect(x: 0, y: 0, width: 600, height: 200)
-                                let image = drawing.image(from: rect, scale: 2)
-                                if let data = image.pngData() {
+                                if let data = signaturePNG(from: drawing, name: signerName) {
                                     model.handle { try await model.saveHandoverSignature(item, imageData: data) }
                                 }
                                 dismiss()
@@ -4186,6 +4520,7 @@ private struct SignatureCaptureView: View {
                 }
             }
         }
+        .interactiveDismissDisabled(!drawing.strokes.isEmpty)
     }
 }
 
@@ -4195,6 +4530,7 @@ private struct CommentSection: View {
     @Bindable var model: BaumioAppViewModel
     @State private var newComment = ""
     @State private var isExpanded = false
+    @State private var deletingComment: DefectComment?
     @FocusState private var isInputFocused: Bool
 
     private var comments: [DefectComment] { model.defectComments[defect.id] ?? [] }
@@ -4235,7 +4571,7 @@ private struct CommentSection: View {
                             }
                             Spacer()
                             Button(role: .destructive) {
-                                model.handle { try await model.deleteDefectComment(comment) }
+                                deletingComment = comment
                             } label: {
                                 Image(systemName: "trash")
                                     .font(.caption)
@@ -4271,6 +4607,9 @@ private struct CommentSection: View {
                 }
             }
         }
+        .deleteConfirmation("Kommentar löschen?", item: $deletingComment, message: { _ in "Der Kommentar wird unwiderruflich gelöscht." }) { comment in
+            model.handle { try await model.deleteDefectComment(comment) }
+        }
     }
 }
 
@@ -4281,6 +4620,7 @@ struct PhotoSection: View {
     let onPick: (Data) -> Void
     @State private var item: PhotosPickerItem?
     @State private var showingCamera = false
+    @State private var viewingPhoto: PhotoRef?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -4288,7 +4628,13 @@ struct PhotoSection: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         ForEach(photos) { photo in
-                            RemoteThumbnail(model: model, bucket: bucket, path: photo.storagePath)
+                            Button {
+                                viewingPhoto = photo
+                            } label: {
+                                RemoteThumbnail(model: model, bucket: bucket, path: photo.storagePath)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Foto öffnen")
                         }
                     }
                 }
@@ -4313,6 +4659,9 @@ struct PhotoSection: View {
                 onPick(ImageCompression.compressedJPEG(from: data) ?? data)
             }
         }
+        .sheet(item: $viewingPhoto) { photo in
+            PhotoViewerSheet(model: model, bucket: bucket, photo: photo)
+        }
         .onChange(of: item) { _, newItem in
             guard let newItem else { return }
             Task {
@@ -4322,6 +4671,80 @@ struct PhotoSection: View {
                 item = nil
             }
         }
+    }
+}
+
+/// Vollbild-Ansicht eines Fotos mit Löschfunktion.
+struct PhotoViewerSheet: View {
+    @Bindable var model: BaumioAppViewModel
+    let bucket: String
+    let photo: PhotoRef
+    @Environment(\.dismiss) private var dismiss
+    @State private var url: URL?
+    @State private var loadFailed = false
+    @State private var confirmingDelete = false
+    @State private var isDeleting = false
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if loadFailed {
+                    ContentUnavailableView("Foto nicht verfügbar", systemImage: "photo.slash")
+                } else if let url {
+                    AsyncImage(url: url) { phase in
+                        if let image = phase.image {
+                            image.resizable().scaledToFit()
+                        } else if phase.error != nil {
+                            ContentUnavailableView("Laden fehlgeschlagen", systemImage: "exclamationmark.triangle")
+                        } else {
+                            ProgressView()
+                        }
+                    }
+                } else {
+                    ProgressView()
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(BaumioTheme.background)
+            .navigationTitle("Foto")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Fertig") { dismiss() }
+                }
+                ToolbarItem(placement: .destructiveAction) {
+                    Button(role: .destructive) {
+                        confirmingDelete = true
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .disabled(isDeleting)
+                    .accessibilityLabel("Foto löschen")
+                }
+            }
+            .alert("Foto löschen?", isPresented: $confirmingDelete) {
+                Button("Abbrechen", role: .cancel) {}
+                Button("Löschen", role: .destructive) {
+                    isDeleting = true
+                    Task {
+                        do {
+                            try await model.deletePhoto(bucket: bucket, photo: photo)
+                            dismiss()
+                        } catch {
+                            model.actionError = error.localizedDescription
+                            isDeleting = false
+                        }
+                    }
+                }
+            } message: {
+                Text("Das Foto wird unwiderruflich gelöscht.")
+            }
+            .task {
+                do { url = try await model.photoURL(bucket: bucket, path: photo.storagePath) }
+                catch { loadFailed = true }
+            }
+        }
+        .appAppearance()
     }
 }
 
@@ -4351,6 +4774,11 @@ struct DefectsView: View {
                 d.description.lowercased().contains(searchText.lowercased()) ||
                 d.responsible.lowercased().contains(searchText.lowercased())
             return matchesTrade && matchesStatus && matchesSearch
+        }.sorted {
+            let aOpen = $0.status != "Behoben"
+            let bOpen = $1.status != "Behoben"
+            if aOpen != bOpen { return aOpen }
+            return $0.deadline < $1.deadline
         }
     }
 
@@ -4383,6 +4811,16 @@ struct DefectsView: View {
 
             SecondaryButton(title: "Grundriss", systemImage: "map") {
                 showingFloorPlan = true
+            }
+
+            if model.defects.isEmpty {
+                EmptyStateView(
+                    title: "Keine Mängel erfasst",
+                    message: "Dokumentiere Mängel mit Foto, Frist und Verantwortlichem – optional direkt auf dem Grundriss.",
+                    systemImage: "exclamationmark.triangle"
+                )
+            } else if filteredDefects.isEmpty {
+                ContentUnavailableView.search(text: searchText)
             }
 
             if !model.defects.isEmpty {
@@ -4441,7 +4879,7 @@ struct DefectsView: View {
                             .accessibilityLabel("Mangelstatus ändern")
                             Text("Frist: \(defect.deadline.formatted(date: .abbreviated, time: .omitted))")
                                 .font(.footnote.bold())
-                                .foregroundStyle(BaumioTheme.secondaryText)
+                                .foregroundStyle(defect.status != "Behoben" && defect.deadline < Date() ? BaumioTheme.danger : BaumioTheme.secondaryText)
                             Spacer()
                             Button {
                                 let next = defect.status == "Behoben" ? "offen" : "behoben"
@@ -4530,6 +4968,7 @@ struct FloorPlanView: View {
     @State private var selectedFloorPlanID: UUID? = nil
     @State private var showingAddFloorPlan = false
     @State private var renamingFloorPlan: FloorPlan? = nil
+    @State private var deletingFloorPlan: FloorPlan?
     @State private var renameLabel = ""
 
     private var activeFloorPlan: FloorPlan? {
@@ -4594,8 +5033,7 @@ struct FloorPlanView: View {
                                 renamingFloorPlan = fp
                             } label: { Label("Umbenennen", systemImage: "pencil") }
                             Button(role: .destructive) {
-                                model.handle { try await model.deleteFloorPlan(fp) }
-                                selectedFloorPlanID = model.floorPlans.first?.id
+                                deletingFloorPlan = fp
                             } label: { Label("Stockwerk löschen", systemImage: "trash") }
                         } label: { Image(systemName: "ellipsis.circle") }
                     }
@@ -4627,8 +5065,13 @@ struct FloorPlanView: View {
                 }
                 Button("Abbrechen", role: .cancel) { renamingFloorPlan = nil }
             }
+            .deleteConfirmation("Stockwerk löschen?", item: $deletingFloorPlan, message: {
+                "„\($0.label)“ wird gelöscht. Die Grundriss-Pins der zugeordneten Mängel gehen verloren."
+            }) { fp in
+                model.handle { try await model.deleteFloorPlan(fp) }
+            }
         }
-        .preferredColorScheme(.dark)
+        .appAppearance()
     }
 
     private var emptyState: some View {
@@ -4662,7 +5105,7 @@ struct FloorPlanView: View {
                                 .padding(.horizontal, 14)
                                 .padding(.vertical, 8)
                                 .background(fp.id == (selectedFloorPlanID ?? model.floorPlans.first?.id) ? BaumioTheme.accent : BaumioTheme.surface)
-                                .foregroundStyle(fp.id == (selectedFloorPlanID ?? model.floorPlans.first?.id) ? .white : BaumioTheme.primaryText)
+                                .foregroundStyle(fp.id == (selectedFloorPlanID ?? model.floorPlans.first?.id) ? Color.black : BaumioTheme.primaryText)
                                 .clipShape(Capsule())
                         }
                     }
@@ -4811,7 +5254,7 @@ struct AddFloorPlanSheet: View {
                 pickerItem = nil
             }
         }
-        .preferredColorScheme(.dark)
+        .appAppearance()
     }
 }
 
@@ -4826,7 +5269,7 @@ private struct PinMarker: View {
                     .font(.title3)
                     .foregroundStyle(priorityColor(defect.priority))
                 Text(defect.title.prefix(12))
-                    .font(.system(size: 8, weight: .bold))
+                    .font(.caption2.bold())
                     .foregroundStyle(.white)
                     .padding(.horizontal, 4)
                     .background(Capsule().fill(Color.black.opacity(0.6)))
@@ -5016,6 +5459,7 @@ struct FundingEditorView: View {
     @State private var notes = ""
     @State private var isSaving = false
     @State private var errorMessage: String?
+    @State private var showingDeleteConfirmation = false
 
     private var maxAmount: Decimal {
         Decimal(string: maxAmountStr.replacingOccurrences(of: ",", with: ".")) ?? 0
@@ -5195,12 +5639,7 @@ struct FundingEditorView: View {
                 if editing != nil {
                     Section {
                         Button("Förderung löschen", role: .destructive) {
-                            Task {
-                                if let item = editing {
-                                    try? await model.deleteFunding(item)
-                                    dismiss()
-                                }
-                            }
+                            showingDeleteConfirmation = true
                         }
                     }
                 }
@@ -5216,6 +5655,22 @@ struct FundingEditorView: View {
         }
         .baumioBackground()
         .onAppear { prefill() }
+        .alert("Förderung löschen?", isPresented: $showingDeleteConfirmation) {
+            Button("Abbrechen", role: .cancel) {}
+            Button("Löschen", role: .destructive) {
+                guard let item = editing else { return }
+                Task {
+                    do {
+                        try await model.deleteFunding(item)
+                        dismiss()
+                    } catch {
+                        errorMessage = error.localizedDescription
+                    }
+                }
+            }
+        } message: {
+            Text("\(editing?.name ?? "Diese Förderung") wird unwiderruflich gelöscht.")
+        }
     }
 
     private func prefill() {
@@ -5271,7 +5726,7 @@ struct TaxesView: View {
     @State private var exportSheet: ShareableURL?
 
     private var taxRelevantCosts: [CostItem] { model.costs.filter { $0.taxRelevantAmount > 0 } }
-    private var materialCosts: [CostItem] { model.costs.filter { $0.category == "Material" } }
+    private var materialCosts: [CostItem] { model.costs.filter { $0.category.lowercased() == "material" } }
     private var taxRelevantSum: Decimal { taxRelevantCosts.reduce(0) { $0 + $1.taxRelevantAmount } }
 
     var body: some View {
@@ -5476,14 +5931,59 @@ struct ReviewEditorView: View {
     }
 }
 
+/// Links zu Nutzungsbedingungen und Datenschutz – müssen im Kaufprozess erreichbar sein.
+private struct LegalLinksRow: View {
+    var body: some View {
+        HStack(spacing: 16) {
+            if let terms = URL(string: "https://www.baumio.eu/agb") {
+                Link("Nutzungsbedingungen", destination: terms)
+            }
+            if let privacy = URL(string: "https://www.baumio.eu/datenschutz") {
+                Link("Datenschutz", destination: privacy)
+            }
+        }
+        .font(.footnote)
+        .foregroundStyle(BaumioTheme.accent)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Zeigt Fehler und Hinweise des Kaufvorgangs (z. B. „Abo wiederhergestellt“).
+private struct StoreMessages: View {
+    var store: StoreManager
+
+    var body: some View {
+        if let error = store.purchaseError {
+            Text(error)
+                .font(.footnote)
+                .foregroundStyle(BaumioTheme.warning)
+        } else if let info = store.infoMessage {
+            Text(info)
+                .font(.footnote)
+                .foregroundStyle(BaumioTheme.success)
+        }
+    }
+}
+
 struct PricingView: View {
     @Bindable var model: BaumioAppViewModel
     @Environment(\.openURL) private var openURL
+    @State private var showingManageSubscriptions = false
 
     private var subtitle: String {
         if model.isBusiness { return "Baumio Business ist aktiv" }
         if model.isPro { return "Baumio Pro ist aktiv" }
-        return "14 Tage kostenlos testen, danach \(model.store.proDisplayPrice)/Monat"
+        return "\(model.store.trialTitle), danach \(model.store.proDisplayPrice)/Monat"
+    }
+
+    /// Preise und Testzeitraum kommen aus StoreKit – die statischen Texte in `DemoData` dienen nur als Fallback.
+    private func displayedPlan(_ plan: PricingPlan) -> PricingPlan {
+        guard plan.planType == "pro" else { return plan }
+        var copy = plan
+        copy.price = "\(model.store.proDisplayPrice) / Monat"
+        copy.subtitle = "\(model.store.trialTitle), danach monatlich kündbar über Apple-Abos."
+        copy.buttonTitle = model.store.trialTitle
+        return copy
     }
 
     var body: some View {
@@ -5511,22 +6011,24 @@ struct PricingView: View {
             }
 
             AdaptiveGrid(minimum: 280) {
-                ForEach(model.pricingPlans.filter { $0.planType != "business" }) { plan in
-                    PricingCard(plan: plan) {
+                ForEach(model.pricingPlans.filter { $0.planType != "business" }, id: \.name) { plan in
+                    PricingCard(plan: displayedPlan(plan)) {
                         model.choosePlan(plan)
                     }
                 }
             }
 
-            if let error = model.store.purchaseError {
-                Text(error)
-                    .font(.footnote)
-                    .foregroundStyle(BaumioTheme.warning)
-            }
+            StoreMessages(store: model.store)
 
             SecondaryButton(title: "Käufe wiederherstellen", systemImage: "arrow.clockwise") {
                 Task { await model.restorePurchases() }
             }
+
+            SecondaryButton(title: "Abo verwalten", systemImage: "gearshape") {
+                showingManageSubscriptions = true
+            }
+
+            LegalLinksRow()
 
             BaumioCard {
                 VStack(alignment: .leading, spacing: 10) {
@@ -5539,6 +6041,7 @@ struct PricingView: View {
                 }
             }
         }
+        .manageSubscriptionsSheet(isPresented: $showingManageSubscriptions)
     }
 }
 
@@ -5554,7 +6057,7 @@ struct PaywallView: View {
     var body: some View {
         ScreenScaffold(title: lockedSection?.rawValue ?? "Baumio Pro", subtitle: lockedSection == nil ? nil : "Diese Funktion ist Teil von Baumio Pro") {
 
-            if lockedSection != nil {
+            if let lockedSection {
                 BaumioCard {
                     HStack(spacing: 12) {
                         Image(systemName: "lock.fill")
@@ -5562,10 +6065,10 @@ struct PaywallView: View {
                             .foregroundStyle(BaumioTheme.accent)
                             .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("\(lockedSection!.rawValue) ist in Baumio Pro enthalten")
+                            Text("\(lockedSection.rawValue) ist in Baumio Pro enthalten")
                                 .font(.headline)
                                 .foregroundStyle(BaumioTheme.primaryText)
-                            Text("14 Tage kostenlos testen – dann \(model.store.proDisplayPrice)/Monat")
+                            Text("\(model.store.trialTitle) – dann \(model.store.proDisplayPrice)/Monat")
                                 .font(.subheadline)
                                 .foregroundStyle(BaumioTheme.secondaryText)
                         }
@@ -5580,7 +6083,7 @@ struct PaywallView: View {
                             .font(.title2.bold())
                             .foregroundStyle(BaumioTheme.primaryText)
                         Spacer()
-                        StatusBadge(title: "14 Tage gratis", color: BaumioTheme.success)
+                        StatusBadge(title: model.store.trialBadge, color: BaumioTheme.success)
                     }
 
                     VStack(alignment: .leading, spacing: 4) {
@@ -5609,7 +6112,7 @@ struct PaywallView: View {
                     }
 
                     PrimaryButton(
-                        title: model.store.isPurchasing ? "Wird verarbeitet …" : (model.store.isLoadingProducts ? "Laden …" : "14 Tage kostenlos testen"),
+                        title: model.store.isPurchasing ? "Wird verarbeitet …" : (model.store.isLoadingProducts ? "Laden …" : model.store.trialTitle),
                         systemImage: "crown.fill"
                     ) {
                         Task {
@@ -5626,6 +6129,14 @@ struct PaywallView: View {
                         Task { await model.restorePurchases() }
                     }
                     .disabled(isButtonBusy)
+
+                    if let info = model.store.infoMessage {
+                        Text(info)
+                            .font(.footnote)
+                            .foregroundStyle(BaumioTheme.success)
+                    }
+
+                    LegalLinksRow()
 
                     Text("Abrechnung über deinen Apple-Account. Das Abo verlängert sich automatisch, sofern es nicht 24 Stunden vor Ablauf gekündigt wird. Verwaltung und Kündigung über die Apple-Abo-Einstellungen.")
                         .font(.caption)
@@ -5709,7 +6220,7 @@ struct TabCustomizationView: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
+        .appAppearance()
     }
 
     private func row(_ section: BaumioSection, isPinned: Bool) -> some View {
@@ -5766,24 +6277,24 @@ struct HelpView: View {
             ScrollView {
                 VStack(spacing: 16) {
                     helpSection("Erste Schritte", entries: [
-                        ("house.fill", "Dashboard", "Auf einen Blick: Budget-Ampel, nächste Termine, offene Aufgaben und Mängel deines Bauprojekts."),
+                        ("house.fill", "Dashboard", "Auf einen Blick: Fortschritt, Kostenübersicht, nächste Termine, offene Aufgaben und Mängel deines Bauprojekts."),
                         ("folder.badge.plus", "Projekt anlegen", "Beim ersten Start führt dich der Einrichtungs-Assistent durch Name, Adresse, Budget und Zeitraum – in drei kurzen Schritten."),
-                        ("building.2.crop.circle", "Projektwechsel", "Oben im Dashboard zwischen mehreren Projekten wechseln oder ein neues anlegen.")
+                        ("building.2.crop.circle", "Projektwechsel", "Oben im Dashboard zwischen mehreren Projekten wechseln. Neue Projekte legst du unter „Projekte“ an.")
                     ])
 
                     helpSection("Baustelle & Planung", entries: [
                         ("calendar", "Termine", "Plane und verwalte alle Bau-Termine. Termine können mit Gewerken verknüpft werden."),
-                        ("checkmark.square", "Aufgaben", "To-Do-Liste für die Baustelle. Aufgaben können priorisiert und Personen zugewiesen werden."),
+                        ("checkmark.square", "Aufgaben", "To-Do-Liste für die Baustelle. Aufgaben erhalten eine Priorität und ein Fälligkeitsdatum."),
                         ("book.closed", "Bautagebuch", "Tägliche Einträge mit Wetter, Temperatur, Fotos und Notizen. Das Wetter wird automatisch vom aktuellen Standort abgerufen."),
                         ("shippingbox", "Materialien", "Verwalte Bestellungen, Lieferungen und Lagerbestand deiner Baumaterialien."),
-                        ("clock", "Zeiterfassung", "Erfasse Arbeitszeiten deiner Gewerke – mit Start, Ende und Pausen.")
+                        ("clock", "Zeiterfassung", "Erfasse Arbeitszeiten mit Kategorie, Datum und Dauer – oder per Stoppuhr.")
                     ])
 
                     helpSection("Finanzen & Kosten", entries: [
-                        ("eurosign.circle", "Kosten & Budget", "Buche Ausgaben und verfolge dein Budget. Die Budget-Ampel im Dashboard zeigt sofort ob du im grünen Bereich bist."),
+                        ("eurosign.circle", "Kosten & Budget", "Buche Ausgaben, ordne sie einer Firma zu und verfolge dein Budget. Die Budget-Ampel unter „Kosten“ zeigt sofort, ob du im grünen Bereich bist."),
                         ("doc.text.magnifyingglass", "Angebote", "Speichere und vergleiche Angebote von Handwerkern. Akzeptierte Angebote fließen automatisch in die Kosten ein."),
                         ("building.columns", "Förderungen", "Behalte den Überblick über beantragte Förderungen und deren Status (KfW, BAFA u. a.)."),
-                        ("percent", "Steuern", "Erfasse steuerrelevante Ausgaben und nutze die Jahresübersicht für die Steuererklärung.")
+                        ("percent", "Steuern", "Exportiere §35a-relevante Arbeitskosten als PDF für die Steuererklärung.")
                     ])
 
                     helpSection("Qualität & Abnahme", entries: [
@@ -5796,12 +6307,12 @@ struct HelpView: View {
 
                     helpSection("Gewerke & Dokumente", entries: [
                         ("wrench.and.screwdriver", "Gewerke & Firmen", "Verwalte alle beteiligten Firmen und Kontakte. Kontakte können direkt aus dem iPhone-Adressbuch importiert werden."),
-                        ("folder", "Dokumente", "Lade Pläne, Verträge und Bescheide hoch. Dokumente können nach Gewerk gefiltert werden.")
+                        ("folder", "Dokumente", "Lade Pläne, Verträge und Bescheide hoch. Dokumente werden nach Kategorie sortiert und privat gespeichert.")
                     ])
 
                     helpSection("App anpassen", entries: [
                         ("square.grid.2x2", "Tab-Leiste anpassen", "Wähle frei, welche 4 Bereiche unten in der Tab-Leiste erscheinen. Alle anderen sind über 'Mehr' erreichbar."),
-                        ("crown", "Baumio Pro", "Schaltet PDF-Export, Förderungs-Tracker, Steuer-Übersicht, Gantt-Diagramm und mehr frei. Einmal kaufen, dauerhaft nutzen.")
+                        ("crown", "Baumio Pro", "Schaltet PDF-Export, Förderungs-Tracker, Steuer-Übersicht, Mängel, Angebotsvergleich und mehr frei. Monatliches Abo, jederzeit über die Apple-Abo-Einstellungen kündbar.")
                     ])
                 }
                 .padding(16)
@@ -5861,13 +6372,13 @@ struct HelpView: View {
 struct SettingsView: View {
     @Bindable var model: BaumioAppViewModel
     @State private var showingDeleteConfirm = false
-    @State private var deleteError: String?
     @State private var showingProfileEditor = false
     @State private var showingMembers = false
     @State private var showingTeamOverview = false
     @State private var showingTabCustomizer = false
     @State private var showingHelp = false
     @State private var dsgvoExport: ShareableURL?
+    @AppStorage("appearanceMode") private var appearanceRaw = AppearanceMode.dark.rawValue
     @Environment(\.requestReview) private var requestReview
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
@@ -5889,7 +6400,17 @@ struct SettingsView: View {
             .buttonStyle(.plain)
 
             SettingsRow(icon: "globe", title: "Sprache", subtitle: "Deutsch")
-            SettingsRow(icon: "moon.fill", title: "Darstellung", subtitle: "Folgt den Systemeinstellungen")
+            BaumioCard {
+                VStack(alignment: .leading, spacing: 10) {
+                    ItemLine(icon: "moon.fill", title: "Darstellung", subtitle: "Dunkel, hell oder wie das Gerät", tint: BaumioTheme.accent)
+                    Picker("Darstellung", selection: $appearanceRaw) {
+                        ForEach(AppearanceMode.allCases) { mode in
+                            Text(mode.rawValue).tag(mode.rawValue)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
+            }
 
             if horizontalSizeClass == .compact {
                 Button {
@@ -6015,7 +6536,7 @@ struct SettingsView: View {
             }
             .buttonStyle(.plain)
 
-            Text("Account")
+            Text("Konto")
                 .font(.caption.bold())
                 .foregroundStyle(BaumioTheme.secondaryText)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -6032,36 +6553,114 @@ struct SettingsView: View {
                 showingDeleteConfirm = true
             } label: {
                 BaumioCard {
-                    ItemLine(icon: "trash", title: "Account löschen", subtitle: "Konto und alle Daten unwiderruflich löschen", tint: BaumioTheme.danger)
+                    ItemLine(icon: "exclamationmark.triangle.fill", title: "Konto löschen", subtitle: "Konto und alle Daten unwiderruflich löschen", tint: BaumioTheme.danger)
                 }
             }
             .buttonStyle(.plain)
 
-            if let deleteError {
-                Text(deleteError)
-                    .font(.footnote)
-                    .foregroundStyle(BaumioTheme.warning)
-            }
         }
-        .alert("Account wirklich löschen?", isPresented: $showingDeleteConfirm) {
-            Button("Abbrechen", role: .cancel) {}
-            Button("Löschen", role: .destructive) {
-                Task {
-                    do {
-                        try await model.deleteAccount()
-                    } catch {
-                        deleteError = error.localizedDescription
-                    }
-                }
-            }
-        } message: {
-            Text("Dein Konto und alle zugehörigen Projektdaten werden unwiderruflich gelöscht. Das kann nicht rückgängig gemacht werden.")
+        .sheet(isPresented: $showingDeleteConfirm) {
+            DeleteAccountSheet(model: model)
         }
         .sheet(isPresented: $showingProfileEditor) {
             ProfileEditorView(model: model)
         }
         .sheet(item: $dsgvoExport) { shareable in
             ShareSheet(items: [shareable.url])
+        }
+    }
+}
+
+/// Bestätigungs-Sheet zum endgültigen Löschen des Kontos (App-Store-Richtlinie 5.1.1(v)).
+struct DeleteAccountSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Bindable var model: BaumioAppViewModel
+    @State private var confirmation = ""
+    @State private var isDeleting = false
+    @State private var errorMessage: String?
+    @State private var showingManageSubscriptions = false
+
+    private var isConfirmed: Bool {
+        confirmation.trimmingCharacters(in: .whitespaces).uppercased() == "LÖSCHEN"
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.largeTitle)
+                        .foregroundStyle(BaumioTheme.danger)
+                        .accessibilityHidden(true)
+                    Text("Konto endgültig löschen?")
+                        .font(.title2.bold())
+                        .foregroundStyle(BaumioTheme.primaryText)
+                    Text("Alle Projekte, Kosten, Mängel, Fotos, Dokumente und dein Profil werden unwiderruflich gelöscht. Das kann nicht rückgängig gemacht werden.")
+                        .foregroundStyle(BaumioTheme.primaryText)
+                    Text("Ein laufendes Abo musst du separat kündigen, falls es nicht über Stripe/Web läuft (z. B. in den Apple-ID-Einstellungen unter „Abos“).")
+                        .font(.subheadline)
+                        .foregroundStyle(BaumioTheme.secondaryText)
+                    Button("Apple-Abos verwalten") { showingManageSubscriptions = true }
+                        .font(.subheadline.bold())
+                        .foregroundStyle(BaumioTheme.accent)
+                        .manageSubscriptionsSheet(isPresented: $showingManageSubscriptions)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Tippe zur Bestätigung LÖSCHEN ein")
+                            .font(.footnote.bold())
+                            .foregroundStyle(BaumioTheme.secondaryText)
+                        TextField("LÖSCHEN", text: $confirmation)
+                            .textInputAutocapitalization(.characters)
+                            .autocorrectionDisabled()
+                            .disabled(isDeleting)
+                            .padding(12)
+                            .background(BaumioTheme.surface, in: RoundedRectangle(cornerRadius: 10))
+                            .accessibilityLabel("Bestätigung: LÖSCHEN eingeben")
+                    }
+
+                    if let errorMessage {
+                        Text(errorMessage)
+                            .font(.footnote)
+                            .foregroundStyle(BaumioTheme.warning)
+                    }
+
+                    Button(role: .destructive) {
+                        deleteAccount()
+                    } label: {
+                        HStack {
+                            if isDeleting { ProgressView().tint(.white) }
+                            Text(isDeleting ? "Wird gelöscht …" : "Konto endgültig löschen")
+                                .font(.headline)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(BaumioTheme.danger)
+                    .disabled(!isConfirmed || isDeleting)
+
+                    Button("Abbrechen") { dismiss() }
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .disabled(isDeleting)
+                }
+                .padding()
+            }
+            .baumioBackground()
+            .navigationTitle("Konto löschen")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .interactiveDismissDisabled(isDeleting)
+    }
+
+    private func deleteAccount() {
+        isDeleting = true
+        errorMessage = nil
+        Task {
+            do {
+                try await model.deleteAccount()
+            } catch {
+                errorMessage = error.localizedDescription
+                isDeleting = false
+            }
         }
     }
 }
@@ -6084,7 +6683,7 @@ struct ProfileEditorView: View {
                         .foregroundStyle(BaumioTheme.secondaryText)
                 }
                 Section {
-                    Text("Der Anzeigename wird lokal gespeichert. E-Mail-Änderungen sind über Supabase möglich.")
+                    Text("Der Anzeigename wird nur auf diesem Gerät gespeichert. Die E-Mail-Adresse kannst du über die Web-App ändern.")
                         .font(.footnote)
                         .foregroundStyle(BaumioTheme.secondaryText)
                 }
@@ -6491,6 +7090,8 @@ struct QuickAddView: View {
     @State private var isAllDay: Bool
     @State private var appointmentStartTime: Date
     @State private var appointmentEndTime: Date
+    @State private var appointmentDays: Int
+    @State private var costTradeID: UUID?
     @State private var isSaving = false
     @State private var errorMessage: String?
     @State private var quickAddPhotoData: Data?
@@ -6515,8 +7116,11 @@ struct QuickAddView: View {
         _unit = State(initialValue: "")
         _notes = State(initialValue: "")
         _date = State(initialValue: Date())
-        _endDate = State(initialValue: Date())
-        _status = State(initialValue: kind == .task ? "normal" : kind == .cost ? "offen" : kind == .defect ? "gemeldet" : "geplant")
+        // Neue Angebote sind standardmäßig 30 Tage gültig (statt „bis heute“).
+        _endDate = State(initialValue: kind == .offer ? (Calendar.current.date(byAdding: .day, value: 30, to: Date()) ?? Date()) : Date())
+        _appointmentDays = State(initialValue: 1)
+        _costTradeID = State(initialValue: nil)
+        _status = State(initialValue: kind == .task ? "normal" : kind == .cost ? "offen" : kind == .defect ? "gemeldet" : kind == .offer ? "Erhalten" : "geplant")
         _category = State(initialValue: "sonstiges")
         _severity = State(initialValue: "mäßig")
         _importance = State(initialValue: "wichtig")
@@ -6585,6 +7189,8 @@ struct QuickAddView: View {
         var minutesStr = ""
         var timeCategory: TimeLogCategory = .planung
         var fundingItemID: UUID? = nil
+        var appointmentDays = 1
+        var costTradeID: UUID? = nil
 
         switch editing {
         case .trade(let item):
@@ -6602,6 +7208,7 @@ struct QuickAddView: View {
             notes = item.notes
             status = appointmentStatusValue(item.status)
             dependsOnID = item.dependsOn
+            appointmentDays = item.durationDays
             isAllDay = item.startTime == nil
             if let st = item.startTime { appointmentStartTime = st }
             if let et = item.endTime { appointmentEndTime = et }
@@ -6633,6 +7240,7 @@ struct QuickAddView: View {
             notes = item.notes
             fundingItemID = item.fundingItemID
             supplier = item.supplier
+            costTradeID = item.tradeID
         case .offer(let item):
             title = item.title.isEmpty ? item.provider : item.title
             secondary = item.provider
@@ -6732,6 +7340,8 @@ struct QuickAddView: View {
         _appointmentStartTime = State(initialValue: appointmentStartTime)
         _appointmentEndTime = State(initialValue: appointmentEndTime)
         _materialURL = State(initialValue: initialMaterialURL)
+        _appointmentDays = State(initialValue: appointmentDays)
+        _costTradeID = State(initialValue: costTradeID)
         _quickAddPhotoData = State(initialValue: nil)
         _quickAddPhotoItem = State(initialValue: nil)
         _showingQuickAddCamera = State(initialValue: false)
@@ -6739,6 +7349,20 @@ struct QuickAddView: View {
 
     private var navigationTitle: String {
         editing == nil ? kind.title : "Bearbeiten"
+    }
+
+    /// Pflichtangabe: Haupttext – bei Firmen genügt alternativ der Firmenname.
+    private var hasRequiredText: Bool {
+        let main = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if kind == .trade { return !main.isEmpty || !secondary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        return !main.isEmpty
+    }
+
+    /// Foto-Uploads laufen nach dem Speichern des Eintrags – Fehler werden angezeigt statt verschluckt.
+    private func attachPhoto(_ upload: () async throws -> Void) async {
+        do { try await upload() } catch {
+            model.actionError = "Der Eintrag wurde gespeichert, das Foto aber nicht: \(error.localizedDescription)"
+        }
     }
 
     var body: some View {
@@ -6766,6 +7390,7 @@ struct QuickAddView: View {
 
                     if kind == .appointment {
                         DatePicker("Datum", selection: $date, displayedComponents: .date)
+                        Stepper("Dauer: \(appointmentDays) Tag\(appointmentDays == 1 ? "" : "e")", value: $appointmentDays, in: 1...365)
                         Toggle("Ganztägig", isOn: $isAllDay)
                         if !isAllDay {
                             DatePicker("Startzeit", selection: $appointmentStartTime, displayedComponents: .hourAndMinute)
@@ -6797,6 +7422,7 @@ struct QuickAddView: View {
                             Text("Sturm").tag("sturm")
                         }
                         TextField("Temperatur (°C)", text: $temperature)
+                            .decimalOnly($temperature)
                         TextField("Anwesende Handwerker, kommagetrennt", text: $supplier)
                     }
 
@@ -6811,10 +7437,12 @@ struct QuickAddView: View {
 
                     if kind == .material {
                         TextField("Menge", text: $amount)
+                            .decimalOnly($amount)
                         TextField("Einheit", text: $unit)
                         TextField("Lieferant", text: $supplier)
                         TextField("Artikelnummer", text: $articleNumber)
                         TextField("Preis/Einheit (€)", text: $secondary)
+                            .decimalOnly($secondary)
                         TextField("Produktlink (optional)", text: $materialURL)
                             .keyboardType(.URL)
                             .textInputAutocapitalization(.never)
@@ -6854,6 +7482,14 @@ struct QuickAddView: View {
                             TextField("Lieferant (optional)", text: $supplier)
                                 .autocorrectionDisabled()
                         }
+                        if !model.trades.isEmpty {
+                            Picker("Firma (optional)", selection: $costTradeID) {
+                                Text("Keine Zuordnung").tag(UUID?.none)
+                                ForEach(model.trades) { trade in
+                                    Text(trade.company.isEmpty ? trade.name : trade.company).tag(Optional(trade.id))
+                                }
+                            }
+                        }
                         Toggle("Als Handwerkerrechnung erfassen", isOn: $isInvoice)
                     }
 
@@ -6886,7 +7522,7 @@ struct QuickAddView: View {
                         }
                         TextField("Anbieter", text: $secondary)
                         TextField("Betrag (€)", text: $amount)
-                        DatePicker("Erhalten am", selection: $date, displayedComponents: .date)
+                            .decimalOnly($amount)
                         DatePicker("Gültig bis", selection: $endDate, displayedComponents: .date)
                         Picker("Status", selection: $status) {
                             Text("Geplant").tag("Geplant")
@@ -7042,8 +7678,18 @@ struct QuickAddView: View {
                         }
                         DatePicker("Datum", selection: $date, displayedComponents: .date)
                         HStack {
-                            TextField("Stunden", text: $hours)
-                            TextField("Minuten", text: $minutes)
+                            Picker("Stunden", selection: Binding(
+                                get: { Int(hours) ?? 0 },
+                                set: { hours = "\($0)" }
+                            )) {
+                                ForEach(0...24, id: \.self) { Text("\($0) Std").tag($0) }
+                            }
+                            Picker("Minuten", selection: Binding(
+                                get: { Int(minutes) ?? 0 },
+                                set: { minutes = "\($0)" }
+                            )) {
+                                ForEach(0...59, id: \.self) { Text("\($0) Min").tag($0) }
+                            }
                         }
                     }
 
@@ -7065,7 +7711,7 @@ struct QuickAddView: View {
                             ))
                             if fundingItemID != nil {
                                 Picker("Förderprogramm", selection: Binding(
-                                    get: { fundingItemID ?? model.funding.first!.id },
+                                    get: { fundingItemID ?? model.funding.first?.id ?? UUID() },
                                     set: { fundingItemID = $0 }
                                 )) {
                                     ForEach(model.funding) { f in
@@ -7076,8 +7722,11 @@ struct QuickAddView: View {
                         }
                     }
 
-                    TextField("Notizen", text: $notes, axis: .vertical)
-                        .lineLimit(3...6)
+                    // Aufgaben, Mängel und Bautagebuch haben kein eigenes Notizfeld (der Haupttext ist die Beschreibung).
+                    if kind != .task && kind != .defect && kind != .diary {
+                        TextField("Notizen", text: $notes, axis: .vertical)
+                            .lineLimit(3...6)
+                    }
                 }
 
                 if let selectedProject = model.selectedProject {
@@ -7107,14 +7756,14 @@ struct QuickAddView: View {
                     Button(isSaving ? "Speichert" : "Speichern") {
                         Task { await save() }
                     }
-                    .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSaving || model.selectedProject == nil)
+                    .disabled(!hasRequiredText || isSaving || model.selectedProject == nil)
                 }
             }
         }
         .baumioBackground()
         .task {
-            // Wetter für Bautagebuch automatisch eintragen wenn Formular öffnet
-            if kind == .diary && secondary.isEmpty {
+            // Wetter für Bautagebuch automatisch eintragen wenn Formular für einen neuen Eintrag öffnet
+            if kind == .diary && editing == nil && secondary.isEmpty {
                 if let result = await fetchCurrentWeather() {
                     secondary = result.weather
                     if temperature.isEmpty { temperature = result.temp }
@@ -7168,17 +7817,19 @@ struct QuickAddView: View {
         switch kind {
         case .trade:
             let parsedBudget = Decimal(string: budget.replacingOccurrences(of: ",", with: ".")) ?? 0
-            try await model.createTrade(name: title, company: secondary, tradeType: category, address: unit, phone: supplier, email: articleNumber, budget: parsedBudget, notes: notes)
+            try await model.createTrade(name: title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? secondary : title, company: secondary, tradeType: category, address: unit, phone: supplier, email: articleNumber, budget: parsedBudget, notes: notes)
         case .appointment:
-            try await model.createAppointment(title: title, date: date, notes: notes, startTime: isAllDay ? nil : appointmentStartTime, endTime: isAllDay ? nil : appointmentEndTime, status: status, dependsOn: dependsOnID)
+            try await model.createAppointment(title: title, date: date, notes: notes, startTime: isAllDay ? nil : appointmentStartTime, endTime: isAllDay ? nil : appointmentEndTime, status: status, dependsOn: dependsOnID, durationDays: appointmentDays)
         case .diary:
             let createdDiary = try await model.createDiaryEntry(date: date, notes: title, weather: secondary.isEmpty ? "bewölkt" : secondary, temperature: Int(temperature), presentTrades: supplier)
-            if let data = quickAddPhotoData { try? await model.addDiaryPhoto(createdDiary, imageData: data) }
+            if let data = quickAddPhotoData { await attachPhoto { try await model.addDiaryPhoto(createdDiary, imageData: data) } }
         case .task:
             let createdTask = try await model.createTask(title: title, priority: status == "geplant" ? "normal" : status, dueDate: date)
-            if let data = quickAddPhotoData { try? await model.addTaskPhoto(createdTask, imageData: data) }
+            if let data = quickAddPhotoData { await attachPhoto { try await model.addTaskPhoto(createdTask, imageData: data) } }
         case .material:
-            try await model.createMaterial(name: title, quantity: decimal(amount, fallback: 1), unit: unit, supplier: supplier, articleNumber: articleNumber, price: decimal(secondary), status: status, orderDate: date, deliveryDate: endDate, notes: notes, fundingItemID: fundingItemID, url: materialURL)
+            // Bestell- und Lieferdatum nur für tatsächlich bestelltes Material setzen.
+            let isOrdered = status != "geplant"
+            try await model.createMaterial(name: title, quantity: decimal(amount, fallback: 1), unit: unit, supplier: supplier, articleNumber: articleNumber, price: decimal(secondary), status: status, orderDate: isOrdered ? date : nil, deliveryDate: isOrdered ? endDate : nil, notes: notes, fundingItemID: fundingItemID, url: materialURL)
         case .cost:
             let createdCost = try await model.createCost(
                 title: title, amount: decimal(amount), category: category,
@@ -7191,17 +7842,15 @@ struct QuickAddView: View {
                 travelAmount: isInvoice ? decimal(travelAmountStr) : 0,
                 warrantyEnd: isInvoice ? warrantyEnd : nil,
                 paymentDate: isInvoice ? costPaymentDate : nil,
-                supplier: supplier
+                supplier: supplier,
+                tradeID: costTradeID
             )
-            if let data = quickAddPhotoData { try? await model.addCostPhoto(createdCost, imageData: data) }
+            if let data = quickAddPhotoData { await attachPhoto { try await model.addCostPhoto(createdCost, imageData: data) } }
         case .offer:
             try await model.createOffer(title: title, company: secondary, amount: decimal(amount), validUntil: endDate, status: status, notes: notes, fundingItemID: fundingItemID, scope: offerScope)
         case .defect:
-            let createdDefect = try await model.createDefect(description: title, trade: defectTrade, responsible: defectResponsible, deadline: defectDeadline, severity: severity, importance: importance, status: status, floorPlanID: defectFloorPlanID)
-            if let data = quickAddPhotoData { try? await model.addDefectPhoto(createdDefect, imageData: data) }
-            if let px = defectPinX, let py = defectPinY {
-                try? await model.updateDefectPin(createdDefect, x: px, y: py)
-            }
+            let createdDefect = try await model.createDefect(description: title, trade: defectTrade, responsible: defectResponsible, deadline: defectDeadline, severity: severity, importance: importance, status: status, floorPlanID: defectFloorPlanID, pinX: defectPinX, pinY: defectPinY)
+            if let data = quickAddPhotoData { await attachPhoto { try await model.addDefectPhoto(createdDefect, imageData: data) } }
         case .timeLog:
             let totalMinutes = (Int(hours) ?? 0) * 60 + (Int(minutes) ?? 0)
             guard totalMinutes > 0 else {
@@ -7209,7 +7858,7 @@ struct QuickAddView: View {
             }
             try await model.createTimeLog(title: title, category: timeCategory, date: date, durationMinutes: totalMinutes, notes: notes)
         case .handover:
-            try await model.createHandoverItem(item: title, room: secondary, tradeType: unit)
+            try await model.createHandoverItem(item: title, room: secondary, tradeType: unit, notes: notes)
         case .funding:
             try await model.createFunding(name: title, provider: secondary, maxAmount: decimal(amount),
                                           status: status == "geplant" ? "geplant" : status,
@@ -7222,9 +7871,9 @@ struct QuickAddView: View {
         switch editing {
         case .trade(let item):
             let parsedBudget = Decimal(string: budget.replacingOccurrences(of: ",", with: ".")) ?? 0
-            try await model.updateTrade(item, name: title, company: secondary, tradeType: category, address: unit, phone: supplier, email: articleNumber, budget: parsedBudget, notes: notes)
+            try await model.updateTrade(item, name: title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? secondary : title, company: secondary, tradeType: category, address: unit, phone: supplier, email: articleNumber, budget: parsedBudget, notes: notes)
         case .appointment(let item):
-            try await model.updateAppointment(item, title: title, date: date, notes: notes, startTime: isAllDay ? nil : appointmentStartTime, endTime: isAllDay ? nil : appointmentEndTime, status: status, dependsOn: dependsOnID)
+            try await model.updateAppointment(item, title: title, date: date, notes: notes, startTime: isAllDay ? nil : appointmentStartTime, endTime: isAllDay ? nil : appointmentEndTime, status: status, dependsOn: dependsOnID, durationDays: appointmentDays)
         case .diary(let item):
             try await model.updateDiaryEntry(item, date: date, notes: title, weather: secondary.isEmpty ? "bewölkt" : secondary, temperature: Int(temperature), presentTrades: supplier)
         case .task(let item):
@@ -7243,12 +7892,17 @@ struct QuickAddView: View {
                 travelAmount: isInvoice ? decimal(travelAmountStr) : 0,
                 warrantyEnd: isInvoice ? warrantyEnd : nil,
                 paymentDate: isInvoice ? costPaymentDate : nil,
-                supplier: supplier
+                supplier: supplier,
+                tradeID: costTradeID
             )
         case .offer(let item):
             try await model.updateOffer(item, title: title, company: secondary, amount: decimal(amount), validUntil: endDate, notes: notes, fundingItemID: fundingItemID, scope: offerScope)
+            // Der im Formular gewählte Status wird getrennt gespeichert.
+            if status != item.status {
+                try await model.updateOfferStatus(item, status: status)
+            }
         case .defect(let item):
-            try await model.updateDefect(item, description: title, trade: defectTrade, responsible: defectResponsible, deadline: defectDeadline, severity: severity, importance: importance, status: status)
+            try await model.updateDefect(item, description: title, trade: defectTrade, responsible: defectResponsible, deadline: defectDeadline, severity: severity, importance: importance, status: status, floorPlanID: defectFloorPlanID, pinX: defectPinX, pinY: defectPinY)
         case .handover(let item):
             try await model.updateHandoverItem(item, itemText: title, room: secondary, tradeType: unit, notes: notes)
         case .timeLog(let item):
@@ -7444,8 +8098,9 @@ struct ProjectEditorView: View {
                 try await model.updateProject(project, name: trimmedName, budget: parsedBudget, status: status, description: description.trimmingCharacters(in: .whitespacesAndNewlines), startDate: startDate, endDate: endDate, eigenkapital: parsedEigenkapital, kredit: parsedKredit)
                 saveCoverImage(for: project.id)
             } else {
-                try await model.createProject(name: trimmedName, budget: parsedBudget, status: status, description: description.trimmingCharacters(in: .whitespacesAndNewlines))
-                if let created = model.projects.first(where: { $0.name == trimmedName }) {
+                try await model.createProject(name: trimmedName, budget: parsedBudget, status: status, description: description.trimmingCharacters(in: .whitespacesAndNewlines), startDate: startDate, endDate: endDate)
+                // `createProject` wählt das neue Projekt automatisch aus.
+                if let created = model.selectedProject {
                     saveCoverImage(for: created.id)
                 }
             }
@@ -7528,7 +8183,7 @@ struct MembersView: View {
     @State private var inviteRole: MemberRole = .viewer
     @State private var isSaving = false
     @State private var errorMessage: String?
-    @State private var shareMessage: String?
+    @State private var shareItem: ShareableText?
 
     var body: some View {
         NavigationStack {
@@ -7536,20 +8191,27 @@ struct MembersView: View {
                 if !model.pendingInvites.isEmpty {
                     Section("Offene Einladungen für dich") {
                         ForEach(model.pendingInvites) { invite in
-                            VStack(alignment: .leading, spacing: 4) {
+                            VStack(alignment: .leading, spacing: 8) {
                                 Text(invite.projectName.isEmpty ? "Projekt-Einladung" : invite.projectName)
                                     .font(.subheadline.bold())
                                     .foregroundStyle(BaumioTheme.primaryText)
                                 Text(invite.role.displayName)
                                     .font(.caption)
                                     .foregroundStyle(BaumioTheme.secondaryText)
-                            }
-                            .swipeActions(edge: .leading) {
-                                Button("Annehmen") {
-                                    model.handle { try await model.acceptInvite(invite) }
+                                HStack(spacing: 12) {
+                                    Button("Annehmen") {
+                                        model.handle { try await model.acceptInvite(invite) }
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .tint(BaumioTheme.success)
+                                    Button("Ablehnen", role: .destructive) {
+                                        model.handle { try await model.declineInvite(invite) }
+                                    }
+                                    .buttonStyle(.bordered)
                                 }
-                                .tint(BaumioTheme.success)
+                                .font(.subheadline)
                             }
+                            .padding(.vertical, 4)
                         }
                     }
                 }
@@ -7663,10 +8325,7 @@ struct MembersView: View {
             .onAppear {
                 model.handle { try await model.loadPendingInvites() }
             }
-            .sheet(item: Binding(
-                get: { shareMessage.map { ShareableText(text: $0) } },
-                set: { if $0 == nil { shareMessage = nil } }
-            )) { item in
+            .sheet(item: $shareItem) { item in
                 ShareLink(item: item.text) {
                     Label("Einladung teilen", systemImage: "square.and.arrow.up")
                 }
@@ -7685,16 +8344,16 @@ struct MembersView: View {
         do {
             try await model.inviteMember(email: emailToInvite, role: inviteRole)
             inviteEmail = ""
-            shareMessage = """
+            shareItem = ShareableText(text: """
                 Du wurdest zu „\(projectName)" auf Baumio eingeladen!
 
                 So startest du:
                 1. Lade Baumio kostenlos im App Store: https://baumio.eu/download
-                2. Erstelle ein Konto mit genau dieser E-Mail: \(emailToInvite)
+                2. Erstelle ein Konto mit genau dieser E-Mail: \(emailToInvite.trimmingCharacters(in: .whitespacesAndNewlines))
                 3. Öffne Einstellungen → Projektmitglieder → Einladung annehmen
 
                 Fertig – du siehst dann das Projekt direkt in deiner Projektliste.
-                """
+                """)
         } catch {
             errorMessage = error.localizedDescription
         }

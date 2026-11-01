@@ -62,24 +62,24 @@ enum BaumioSection: String, CaseIterable, Identifiable {
 
     var systemImage: String {
         switch self {
-        case .dashboard: "square.grid.2x2"
-        case .projects: "building.2"
-        case .trades: "hammer"
+        case .dashboard: "square.grid.2x2.fill"
+        case .projects: "building.2.fill"
+        case .trades: "person.2.fill"
         case .schedule: "calendar"
-        case .diary: "book.pages"
+        case .diary: "pencil.and.list.clipboard"
         case .tasks: "checklist"
-        case .materials: "shippingbox"
-        case .timeTracking: "clock"
-        case .handover: "checkmark.seal"
-        case .documents: "doc.text"
-        case .costs: "eurosign.circle"
-        case .offers: "doc.badge.clock"
-        case .defects: "exclamationmark.triangle"
-        case .funding: "leaf"
-        case .taxes: "tray.and.arrow.down"
-        case .reviews: "star"
-        case .pricing: "crown"
-        case .settings: "gearshape"
+        case .materials: "shippingbox.fill"
+        case .timeTracking: "stopwatch.fill"
+        case .handover: "signature"
+        case .documents: "folder.fill"
+        case .costs: "eurosign.circle.fill"
+        case .offers: "doc.text.magnifyingglass"
+        case .defects: "exclamationmark.triangle.fill"
+        case .funding: "banknote"
+        case .taxes: "percent"
+        case .reviews: "star.fill"
+        case .pricing: "crown.fill"
+        case .settings: "gearshape.fill"
         }
     }
 
@@ -226,6 +226,8 @@ struct CostItem: Identifiable, Hashable {
     var invoiceReference: String
     var notes: String = ""
     var fundingItemID: UUID? = nil
+    /// Zugeordnete Firma (im notes-Feld kodiert, siehe `FundingLinkCoder`).
+    var tradeID: UUID? = nil
     var invoiceDate: Date? = nil
     var dueDate: Date? = nil
     var laborAmount: Decimal = 0
@@ -246,7 +248,7 @@ extension CostItem {
     var taxRelevantAmount: Decimal {
         let explicit = laborAmount + machineAmount + travelAmount
         if explicit > 0 { return explicit }
-        return category == "Lohn" ? planned : 0
+        return category.lowercased() == "lohn" ? planned : 0
     }
     var isInvoice: Bool { invoiceDate != nil || laborAmount > 0 || machineAmount > 0 || travelAmount > 0 }
 }
@@ -517,6 +519,24 @@ struct ReviewItem: Identifiable, Hashable {
     var punctuality: Int = 0
     var communication: Int = 0
     var pricePerformance: Int = 0
+    var tradeID: UUID? = nil
+}
+
+/// Darstellungsmodus der App (Einstellungen → Darstellung).
+enum AppearanceMode: String, CaseIterable, Identifiable {
+    case dark = "Dunkel"
+    case light = "Hell"
+    case system = "System"
+
+    var id: String { rawValue }
+
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .dark: .dark
+        case .light: .light
+        case .system: nil
+        }
+    }
 }
 
 enum MemberRole: String, CaseIterable, Identifiable {

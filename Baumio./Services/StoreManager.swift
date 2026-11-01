@@ -7,13 +7,19 @@ import StoreKit
 @Observable
 final class StoreManager {
     /// Produkt-ID des Monats-Abos. Muss exakt mit App Store Connect / der .storekit-Datei übereinstimmen.
-    static let proProductID = "de.baumio.pro.monthly"
+    static let proProductID = "de.baumio.pro.monthly.3"
 
     private(set) var products: [Product] = []
     private(set) var isSubscribed = false
     private(set) var isPurchasing = false
     private(set) var isLoadingProducts = false
     var purchaseError: String?
+    /// Neutrale Rückmeldung (z. B. „Abo wiederhergestellt“, „Kauf wartet auf Genehmigung“).
+    var infoMessage: String?
+
+    /// Supabase-User-ID des angemeldeten Kontos. Ein Abo zählt nur für das Konto, mit dem es gekauft wurde
+    /// (`appAccountToken`). Ältere Käufe ohne Token bleiben für alle Konten gültig.
+    var accountToken: UUID?
 
     private var updatesTask: Task<Void, Never>?
 
@@ -34,6 +40,30 @@ final class StoreManager {
         proProduct?.displayPrice ?? "8,99 €"
     }
 
+    /// Länge des kostenlosen Testzeitraums in Tagen – direkt aus dem StoreKit-Produkt.
+    var trialDays: Int? {
+        guard let offer = proProduct?.subscription?.introductoryOffer, offer.paymentMode == .freeTrial else { return nil }
+        let period = offer.period
+        switch period.unit {
+        case .day: return period.value
+        case .week: return period.value * 7
+        case .month: return period.value * 30
+        case .year: return period.value * 365
+        @unknown default: return nil
+        }
+    }
+
+    /// z. B. „14 Tage kostenlos testen“ (Fallback, solange das Produkt nicht geladen ist).
+    var trialTitle: String {
+        if let days = trialDays { return "\(days) Tage kostenlos testen" }
+        return "Kostenlos testen"
+    }
+
+    var trialBadge: String {
+        if let days = trialDays { return "\(days) Tage gratis" }
+        return "Gratis testen"
+    }
+
     func loadProducts() async {
         isLoadingProducts = true
         defer { isLoadingProducts = false }
@@ -48,6 +78,8 @@ final class StoreManager {
     /// Transaktion verknüpft, damit die Server-Benachrichtigung den Kauf dem Nutzer zuordnen kann.
     @discardableResult
     func purchasePro(appAccountToken: UUID? = nil) async -> Bool {
+        purchaseError = nil
+        infoMessage = nil
         if proProduct == nil {
             await loadProducts()
         }
@@ -67,11 +99,20 @@ final class StoreManager {
             let result = try await product.purchase(options: options)
             switch result {
             case .success(let verification):
-                let transaction = try checkVerified(verification)
-                await transaction.finish()
-                await refreshSubscriptionStatus()
-                return isSubscribed
-            case .userCancelled, .pending:
+                switch verification {
+                case .unverified(let tx, _):
+                    await tx.finish()
+                    purchaseError = StoreError.failedVerification.localizedDescription
+                    return false
+                case .verified(let tx):
+                    await tx.finish()
+                    await refreshSubscriptionStatus()
+                    return isSubscribed
+                }
+            case .pending:
+                infoMessage = "Der Kauf wartet noch auf Genehmigung (z. B. Familienfreigabe). Pro wird nach der Freigabe automatisch aktiviert."
+                return false
+            case .userCancelled:
                 return false
             @unknown default:
                 return false
@@ -84,19 +125,25 @@ final class StoreManager {
 
     /// Stellt frühere Käufe wieder her (z. B. nach Neuinstallation oder Gerätewechsel).
     func restore() async {
+        purchaseError = nil
+        infoMessage = nil
         do {
             try await AppStore.sync()
         } catch {
             purchaseError = error.localizedDescription
+            return
         }
         await refreshSubscriptionStatus()
+        infoMessage = isSubscribed ? "Dein Abo wurde wiederhergestellt." : "Es wurden keine aktiven Käufe für dieses Konto gefunden."
     }
 
     /// Gibt den JWS-String der aktuellen Pro-Transaktion zurück (für Trial-Erkennung in der Edge Function).
     func currentTransactionJWS() async -> String? {
         for await result in Transaction.currentEntitlements {
             if case .verified(let transaction) = result,
-               transaction.productID == Self.proProductID {
+               transaction.productID == Self.proProductID,
+               transaction.revocationDate == nil,
+               belongsToCurrentAccount(transaction) {
                 return result.jwsRepresentation
             }
         }
@@ -109,6 +156,7 @@ final class StoreManager {
         for await result in Transaction.currentEntitlements {
             guard let transaction = try? checkVerified(result) else { continue }
             guard transaction.productID == Self.proProductID, transaction.revocationDate == nil else { continue }
+            guard belongsToCurrentAccount(transaction) else { continue }
             if let expiration = transaction.expirationDate {
                 if expiration > Date() { active = true }
             } else {
@@ -116,6 +164,20 @@ final class StoreManager {
             }
         }
         isSubscribed = active
+    }
+
+    func reset() {
+        isSubscribed = false
+        accountToken = nil
+        infoMessage = nil
+        purchaseError = nil
+    }
+
+    /// Ohne angemeldetes Konto (Demo-Modus) zählt jede Transaktion; sonst nur Käufe dieses Kontos oder ältere ohne Token.
+    private func belongsToCurrentAccount(_ transaction: Transaction) -> Bool {
+        guard let accountToken else { return true }
+        guard let owner = transaction.appAccountToken else { return true }
+        return owner == accountToken
     }
 
     private func observeTransactionUpdates() -> Task<Void, Never> {

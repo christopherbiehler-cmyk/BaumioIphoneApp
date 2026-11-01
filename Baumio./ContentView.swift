@@ -11,7 +11,17 @@ struct ContentView: View {
 
     var body: some View {
         Group {
-            if !model.hasCompletedOnboarding {
+            if model.isRestoringSession {
+                // Gespeicherte Sitzung wird wiederhergestellt – kein Onboarding-Flackern beim App-Start.
+                ZStack {
+                    BaumioTheme.background.ignoresSafeArea()
+                    VStack(spacing: 16) {
+                        BrandHeader(compact: true)
+                        ProgressView()
+                            .tint(BaumioTheme.accent)
+                    }
+                }
+            } else if !model.hasCompletedOnboarding {
                 OnboardingView(model: model)
             } else if !model.isAuthenticated {
                 AuthView(model: model)
@@ -34,12 +44,8 @@ struct ContentView: View {
             }
         }
         .tint(BaumioTheme.accent)
-        .preferredColorScheme(.dark)
-        .alert("Aktion fehlgeschlagen", isPresented: Binding(get: { model.actionError != nil }, set: { if !$0 { model.actionError = nil } })) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(model.actionError ?? "")
-        }
+        .appAppearance()
+        .errorToast($model.actionError)
         .task {
             await model.restoreSession()
         }
@@ -56,7 +62,11 @@ struct ContentView: View {
             // Bei Rückkehr in den Vordergrund Pro-Status neu laden,
             // damit z. B. im Backend manuell vergebenes Pro schnell erscheint.
             guard newPhase == .active, model.isAuthenticated else { return }
-            Task { await model.refreshProStatus() }
+            Task {
+                await model.refreshProStatus()
+                await model.scheduleNotificationsIfEnabled()
+            }
+            model.registerDeviceIfNeeded()
         }
     }
 
@@ -183,7 +193,9 @@ private struct MoreView: View {
     ]
 
     private var sections: [BaumioSection] {
-        Self.allSectionsOrdered.filter { !pinnedSections.contains($0) }
+        Self.allSectionsOrdered
+            .filter { !pinnedSections.contains($0) }
+            .sorted { $0.rawValue.localizedCompare($1.rawValue) == .orderedAscending }
     }
 
     var body: some View {

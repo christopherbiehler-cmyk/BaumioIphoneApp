@@ -299,3 +299,77 @@ struct SectionHeader: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
+
+// MARK: - Error Toast
+
+struct BaumioErrorToast: View {
+    let message: String
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .font(.subheadline)
+            Text(message)
+                .font(.subheadline)
+                .foregroundStyle(.white)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(.caption.bold())
+                    .foregroundStyle(.white.opacity(0.6))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(.black.opacity(0.88), in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(.orange.opacity(0.35), lineWidth: 1))
+        .shadow(color: .black.opacity(0.4), radius: 12, y: 4)
+        .padding(.horizontal, 20)
+        .contentShape(RoundedRectangle(cornerRadius: 14))
+        .onTapGesture { onDismiss() }
+    }
+}
+
+private struct ErrorToastModifier: ViewModifier {
+    @Binding var message: String?
+    @State private var autoDismissTask: Task<Void, Never>?
+
+    func body(content: Content) -> some View {
+        content
+            .overlay(alignment: .bottom) {
+                if let msg = message {
+                    BaumioErrorToast(message: msg) {
+                        autoDismissTask?.cancel()
+                        withAnimation(.spring(response: 0.35)) { message = nil }
+                    }
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .padding(.bottom, 24)
+                    .onAppear { scheduleAutoDismiss() }
+                    .onDisappear { autoDismissTask?.cancel() }
+                }
+            }
+            .animation(.spring(response: 0.4, dampingFraction: 0.8), value: message)
+    }
+
+    private func scheduleAutoDismiss() {
+        autoDismissTask?.cancel()
+        autoDismissTask = Task {
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                withAnimation(.spring(response: 0.35)) { message = nil }
+            }
+        }
+    }
+}
+
+extension View {
+    func errorToast(_ message: Binding<String?>) -> some View {
+        modifier(ErrorToastModifier(message: message))
+    }
+}

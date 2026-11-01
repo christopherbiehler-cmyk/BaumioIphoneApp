@@ -45,7 +45,7 @@
               "locale" : "de_DE"
             }
           ],
-          "productID" : "de.baumio.pro.monthly",
+          "productID" : "de.baumio.pro.monthly.3",
           "recurringSubscriptionPeriod" : "P1M",
           "referenceName" : "Baumio Pro Monatlich",
           "subscriptionGroupID" : "22222222-2222-4222-8222-222222222222",

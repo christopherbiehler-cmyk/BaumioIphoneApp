@@ -165,8 +165,11 @@ struct GanttPDFPage: View {
     }
 }
 
-/// Rendert eine beliebige SwiftUI-View als einseitige PDF und gibt die Datei-URL zurück.
+/// Rendert eine beliebige SwiftUI-View als PDF (mehrere A4-Seiten bei langem Inhalt) und gibt die Datei-URL zurück.
 enum PDFExporter {
+    /// A4-Seitenhöhe bei 96 dpi (Breite 794 pt).
+    private static let pageHeight: CGFloat = 1123
+
     @MainActor
     static func export<Content: View>(_ content: Content, fileName: String, width: CGFloat = 794) -> URL? {
         let renderer = ImageRenderer(content: content)
@@ -175,11 +178,21 @@ enum PDFExporter {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
         var result: URL?
         renderer.render { size, context in
-            var box = CGRect(origin: .zero, size: size)
+            // Kurze Inhalte behalten ihre Höhe (eine Seite), lange werden auf A4-Seiten aufgeteilt.
+            let pageHeight = size.height > Self.pageHeight ? Self.pageHeight : size.height
+            let pageCount = max(1, Int((size.height / pageHeight).rounded(.up)))
+            var box = CGRect(x: 0, y: 0, width: size.width, height: pageHeight)
             guard let pdf = CGContext(url as CFURL, mediaBox: &box, nil) else { return }
-            pdf.beginPDFPage(nil)
-            context(pdf)
-            pdf.endPDFPage()
+            for page in 0..<pageCount {
+                pdf.beginPDFPage(nil)
+                pdf.saveGState()
+                pdf.clip(to: box)
+                // PDF-Koordinaten beginnen unten: Inhalt so verschieben, dass Seite `page` von oben sichtbar ist.
+                pdf.translateBy(x: 0, y: -(size.height - CGFloat(page + 1) * pageHeight))
+                context(pdf)
+                pdf.restoreGState()
+                pdf.endPDFPage()
+            }
             pdf.closePDF()
             result = url
         }
@@ -321,8 +334,8 @@ private struct FloorPlanPinOverlay: View {
             // Legende
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 0) {
-                    legendCell("Nr.", width: 32, isHeader: true)
-                    legendCell("Mangel", width: 380, isHeader: true)
+                    legendCell("Nr.", width: 28, isHeader: true)
+                    legendCell("Mangel", width: 336, isHeader: true)
                     legendCell("Gewerk", width: 150, isHeader: true)
                     legendCell("Status", width: 160, isHeader: true)
                 }
@@ -331,8 +344,8 @@ private struct FloorPlanPinOverlay: View {
                 ForEach(data.pins, id: \.number) { pin in
                     let isEven = pin.number % 2 == 0
                     HStack(spacing: 0) {
-                        legendCell("\(pin.number)", width: 32, bold: true)
-                        legendCell(pin.title, width: 380)
+                        legendCell("\(pin.number)", width: 28, bold: true)
+                        legendCell(pin.title, width: 336)
                         legendCell(pin.trade.isEmpty ? "–" : pin.trade, width: 150)
                         legendCell(pin.status.isEmpty ? "–" : pin.status, width: 160)
                     }
@@ -510,12 +523,21 @@ struct DefectsPDFPage: View {
 
 // MARK: - Abnahmeprotokoll PDF
 
+/// Digitale Unterschriften einer Abnahme für das PDF.
+struct HandoverPDFSignature {
+    let trade: String
+    let signedAt: Date?
+    let sig1: UIImage?
+    let sig2: UIImage?
+}
+
 /// Offizielles Übergabe- & Abnahmeprotokoll mit zwei Unterschriftenfeldern.
 struct HandoverPDFPage: View {
     let items: [HandoverItem]
     let projectName: String
     let exportDate: Date
     var project: Project? = nil
+    var signatures: [HandoverPDFSignature] = []
 
     private var grouped: [(String, [HandoverItem])] {
         var seen = Set<String>()
@@ -593,11 +615,60 @@ struct HandoverPDFPage: View {
             }
             .padding(.top, 8)
 
+            // Digital unterzeichnete Abnahmen je Gewerk
+            if !signatures.isEmpty {
+                Text("DIGITALE ABNAHMEN")
+                    .font(.system(size: 10, weight: .bold)).foregroundStyle(Color(hex: "888888")).padding(.top, 14)
+                ForEach(signatures.indices, id: \.self) { index in
+                    signatureBlock(signatures[index])
+                }
+            }
+
             Spacer(minLength: 12)
             Rectangle().fill(Color(hex: "1C3557")).frame(height: 1)
-            PDFSignatureSection()
+            if signatures.isEmpty {
+                PDFSignatureSection()
+            }
         }
         .padding(36).frame(width: 794).background(Color.white)
+    }
+
+    private func signatureBlock(_ signature: HandoverPDFSignature) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(signature.trade).font(.system(size: 11, weight: .semibold))
+                Spacer()
+                if let date = signature.signedAt {
+                    Text("Unterzeichnet am \(date.formatted(date: .long, time: .shortened))")
+                        .font(.system(size: 9)).foregroundStyle(Color(hex: "555555"))
+                }
+            }
+            HStack(alignment: .bottom, spacing: 40) {
+                signatureImage(signature.sig1, label: "Auftraggeber")
+                signatureImage(signature.sig2, label: "Auftragnehmer / Bauleiter")
+            }
+        }
+        .padding(10)
+        .background(Color(hex: "F9F9F9"))
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color(hex: "DDDDDD"), lineWidth: 0.5))
+        .padding(.top, 6)
+    }
+
+    private func signatureImage(_ image: UIImage?, label: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Group {
+                if let image {
+                    Image(uiImage: image).resizable().scaledToFit()
+                } else {
+                    Color.clear
+                }
+            }
+            .frame(height: 52)
+            Rectangle().fill(Color(hex: "222222")).frame(height: 1)
+            Text(label).font(.system(size: 9, weight: .semibold)).foregroundStyle(Color(hex: "333333"))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func checklistRow(_ e: HandoverItem) -> some View {
@@ -748,9 +819,10 @@ struct BauberichtPDFPage: View {
     let project: Project
     let exportDate: Date
 
-    private var totalPlanned: Decimal { model.costs.reduce(0) { $0 + $1.planned } }
-    private var totalOrdered: Decimal { model.costs.reduce(0) { $0 + $1.ordered } }
-    private var totalPaid: Decimal { model.costs.reduce(0) { $0 + $1.paid } }
+    private var activeCosts: [CostItem] { model.costs.filter { $0.status.lowercased() != "storniert" } }
+    private var totalPlanned: Decimal { activeCosts.reduce(0) { $0 + $1.planned } }
+    private var totalOrdered: Decimal { activeCosts.reduce(0) { $0 + $1.ordered } }
+    private var totalPaid: Decimal { activeCosts.reduce(0) { $0 + $1.paid } }
     private var openDefects: [DefectItem] { model.defects.filter { $0.status.lowercased() != "behoben" } }
     private var openTasks: [TaskItem] { model.tasks.filter { !$0.isDone } }
 
