@@ -22,10 +22,9 @@ final class Baumio_UITestsLaunchTests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
 
-        // Insert steps here to perform after app launch but before taking a screenshot,
-        // such as logging into a test account or navigating somewhere in the app
-        // XCUIAutomation Documentation
-        // https://developer.apple.com/documentation/xcuiautomation
+        // Erst auf den Vordergrund warten, sonst schlägt der Snapshot manchmal fehl („Error getting main window“).
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 15))
+        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 15))
 
         let attachment = XCTAttachment(screenshot: app.screenshot())
         attachment.name = "Launch Screen"

@@ -23,21 +23,14 @@ final class Baumio_UITests: XCTestCase {
     }
 
     @MainActor
-    func testExample() throws {
-        // UI tests must launch the application that they test.
+    func testAppLaunchesAndStaysInForeground() throws {
         let app = XCUIApplication()
         app.launch()
 
-        // Use XCTAssert and related functions to verify your tests produce the correct results.
-        // XCUIAutomation Documentation
-        // https://developer.apple.com/documentation/xcuiautomation
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 15), "Die App soll nach dem Start im Vordergrund laufen.")
     }
 
-    @MainActor
-    func testLaunchPerformance() throws {
-        // This measures how long it takes to launch your application.
-        measure(metrics: [XCTApplicationLaunchMetric()]) {
-            XCUIApplication().launch()
-        }
-    }
+    // Hinweis: Der von Xcode vorgegebene `testLaunchPerformance` (XCTApplicationLaunchMetric) wurde entfernt.
+    // Er liefert im Simulator häufig 0 Messwerte und schlägt dann ohne App-Fehler fehl.
+    // Startzeiten lassen sich zuverlässiger über MetricKit (siehe BaumioMetricKit.swift) und Instruments beobachten.
 }
